@@ -73,12 +73,14 @@ BT.MCP = {
       this.via = target.via;
       ws.send(JSON.stringify({ hello: { app: "blendtinux", v: 1 } }));
       BT.emit("mcp");
-      if (target.via === "relay") {
-        // walk the user through hooking Claude up right after they opt in
-        if (this._announce) BT.emit("mcp-pop");
-        else BT.emit("toast", "MCP linked, your code is " + this.code + " (click it up top for setup)");
+      // explain what just happened and what to do next; quiet toast on
+      // silent reconnects so page loads and drops don't nag
+      if (this._announce) {
+        BT.emit("mcp-pop");
       } else {
-        BT.emit("toast", "MCP connected to the local server");
+        BT.emit("toast", target.via === "relay"
+          ? "MCP linked, your code is " + this.code + " (click it up top for help)"
+          : "MCP connected to the local server (click 'local' up top for help)");
       }
       this._announce = false;
     };

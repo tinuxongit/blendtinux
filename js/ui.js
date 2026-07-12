@@ -165,10 +165,15 @@ BT.UI = {
         : BT.MCP.enabled
           ? "MCP is on, connecting..."
           : "Let an AI assistant control BlendTinux over MCP";
-      mcpCode.hidden = !(BT.MCP.connected && BT.MCP.via === "relay");
+      mcpCode.hidden = !BT.MCP.connected;
       if (!mcpCode.hidden) {
-        mcpCode.textContent = BT.MCP.code;
-        mcpCode.dataset.tip = "your pairing code, click for setup instructions";
+        if (BT.MCP.via === "relay") {
+          mcpCode.textContent = BT.MCP.code;
+          mcpCode.dataset.tip = "your pairing code, click for setup instructions";
+        } else {
+          mcpCode.textContent = "local";
+          mcpCode.dataset.tip = "connected to your local server, click for help getting started";
+        }
       }
     };
     BT.on("mcp", syncMcp);
@@ -202,23 +207,41 @@ BT.UI = {
       document.getElementById("app").appendChild(pop);
       pop.addEventListener("click", (ev) => { if (ev.target === pop) pop.hidden = true; });
     }
-    const url = BT.MCP.url();
-    const cmd = "claude mcp add --transport http blendtinux " + url;
-    pop.innerHTML =
-      '<div class="mcp-card">' +
-      '<div class="plabel">Let Claude build in this tab</div>' +
-      '<p>This tab has its own MCP address (code <span class="mono">' + this._esc(BT.MCP.code) + "</span>). " +
-      "Anything you connect it to can see and edit this scene, and only this scene. Keep the tab open.</p>" +
-      "<p><strong>Claude Code</strong> · one command in any terminal does everything:</p>" +
-      '<div class="mcp-cmd"><code>' + this._esc(cmd) + '</code><button class="abtn primary" data-copy="cmd">Copy</button></div>' +
-      "<p><strong>claude.ai or Claude Desktop</strong> · Settings, Connectors, Add custom connector, then paste the address:</p>" +
-      '<div class="mcp-cmd"><code>' + this._esc(url) + '</code><button class="abtn" data-copy="url">Copy</button></div>' +
-      '<p>Then just ask Claude, for example: "look at my BlendTinux scene and build a lighthouse on a rocky island, then render it".</p>' +
-      '<div class="agrid" style="grid-template-columns:1fr"><button class="abtn" id="mcp-pop-close">Done</button></div>' +
-      "</div>";
+    const example = "Look at my BlendTinux scene, then build a lighthouse on a rocky island and render it at 400 samples.";
+    const exampleRow =
+      "<p><strong>Then just ask Claude</strong> · for example:</p>" +
+      '<div class="mcp-cmd"><code>' + this._esc(example) + '</code><button class="abtn" data-copy="example">Copy</button></div>';
+
+    if (BT.MCP.via === "local") {
+      pop.innerHTML =
+        '<div class="mcp-card">' +
+        '<div class="plabel">Connected to your local server</div>' +
+        "<p>This tab is linked to the BlendTinux MCP server running on your own machine. " +
+        "The Claude that launched it (usually Claude Code) already has the blendtinux tools, so there is nothing left to set up.</p>" +
+        "<p>Everything Claude does shows up here live, each change is one Ctrl+Z step, and it all autosaves into the open project.</p>" +
+        exampleRow +
+        '<div class="agrid" style="grid-template-columns:1fr"><button class="abtn" id="mcp-pop-close">Done</button></div>' +
+        "</div>";
+    } else {
+      const url = BT.MCP.url();
+      const cmd = "claude mcp add --transport http blendtinux " + url;
+      pop.innerHTML =
+        '<div class="mcp-card">' +
+        '<div class="plabel">Connected · now point Claude at this tab</div>' +
+        '<p>This tab has its own MCP address (code <span class="mono">' + this._esc(BT.MCP.code) + "</span>). " +
+        "Anything you connect it to can see and edit this scene, and only this scene. Keep the tab open.</p>" +
+        "<p><strong>Claude Code</strong> · one command in any terminal does everything:</p>" +
+        '<div class="mcp-cmd"><code>' + this._esc(cmd) + '</code><button class="abtn primary" data-copy="cmd">Copy</button></div>' +
+        "<p><strong>claude.ai or Claude Desktop</strong> · Settings, Connectors, Add custom connector, then paste the address:</p>" +
+        '<div class="mcp-cmd"><code>' + this._esc(url) + '</code><button class="abtn" data-copy="url">Copy</button></div>' +
+        exampleRow +
+        '<div class="agrid" style="grid-template-columns:1fr"><button class="abtn" id="mcp-pop-close">Done</button></div>' +
+        "</div>";
+      pop.querySelector('[data-copy="cmd"]').addEventListener("click", () => this._copy(cmd, "command"));
+      pop.querySelector('[data-copy="url"]').addEventListener("click", () => this._copy(url, "address"));
+    }
     pop.hidden = false;
-    pop.querySelector('[data-copy="cmd"]').addEventListener("click", () => this._copy(cmd, "command"));
-    pop.querySelector('[data-copy="url"]').addEventListener("click", () => this._copy(url, "address"));
+    pop.querySelector('[data-copy="example"]').addEventListener("click", () => this._copy(example, "example prompt"));
     pop.querySelector("#mcp-pop-close").addEventListener("click", () => { pop.hidden = true; });
   },
 
