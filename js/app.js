@@ -7,16 +7,16 @@
   BT.Gizmo.init();
   BT.Sculpt.init();
   BT.Vertex.init();
+  BT.Render.init(); // before UI, so entering render mode starts the tracer first
   BT.UI.init();
 
   const restored = BT.IO.restore();
   if (!restored) {
-    const data = BT.Mesh.createPrimitive("sphere");
-    const obj = BT.Mesh.createObject({ data, name: "sphere" });
-    obj.mesh.position.y = 0.6;
-    BT.addObject(obj, true);
+    BT.IO.starterScene();
     BT.UI.showHint("orbit", 'drag to orbit · <span class="kbd">shift+drag</span> pans · <span class="kbd">scroll</span> zooms');
   }
+  BT.UI.syncProjectUI();
+  BT.MCP.init();
 
   // a live deform preview only makes sense for the object it started on
   BT.on("selection", () => BT.Deform.cancel());

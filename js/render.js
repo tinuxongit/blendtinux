@@ -1,94 +1,130 @@
-/* Ray-traced render mode: a progressive GPU path tracer. The scene's
-   triangles and a BVH are packed into float textures and a fragment shader
-   traces full light paths (sun with soft shadows, sky, diffuse bounces,
-   metal reflection, glass refraction, glowing emitters). Every frame adds
-   one sample per pixel and accumulates, so quality keeps climbing the
-   longer it runs. Needs WebGL2 + float render targets. */
+/* Render mode: a progressive GPU path tracer (shaders in render-shaders.js).
+   The scene's triangles and a BVH are packed into float textures and a
+   fragment shader traces full light paths (sun with soft shadows, sky,
+   diffuse bounces, metal reflection, glass refraction, glowing emitters
+   sampled as real lights). Every frame adds one sample per pixel; orbiting
+   restarts the accumulation, so it behaves like a live rendered viewport.
+   Entering/leaving the "render" mode opens/closes it. Needs WebGL2 + float
+   render targets. */
 "use strict";
 
 BT.Render = {
   _renderer: null,
+  _canvas: null,
   _running: false,
+  _paused: false,
   _samples: 0,
   _t0: 0,
-  _rtA: null, _rtB: null,
+  _rtA: null, _rtB: null, _rtOpts: null,
   _traceScene: null, _traceMat: null,
   _viewScene: null, _viewMat: null,
   _quadCam: null,
   _texes: [],
+  _camSig: "",
+  _onResize: null,
 
-  SUN_DIR: new THREE.Vector3(3, 5, 2).normalize(),
+  SUN_COLORS: {
+    day: [2.6, 2.35, 2.0],
+    sunset: [3.0, 1.7, 0.95],
+    night: [0.3, 0.36, 0.55],
+    solid: [2.6, 2.35, 2.0],
+  },
+
+  // everything the render panel drives; persisted per project in the
+  // autosave payload. `settings` is a live copy cloned from DEFAULTS below.
+  DEFAULTS: {
+    target: 1000,      // stop refining at this many samples, 0 = keep going
+    bounces: 5,
+    resScale: 1,       // 0.5 | 1 | 2 of the window size
+    sunElev: 54, sunAzim: 56, sunStrength: 1, // ~ the old sun at (3,5,2)
+    sky: "day",        // day | sunset | night | solid
+    skyColor: "#0e1220",
+    bgTransparent: false,
+    ground: true,
+    exposure: 1,
+    aperture: 0, focus: 0, // focus 0 = the orbit target distance
+  },
+  settings: null, // assigned right after this object literal
+
+  init() {
+    BT.on("mode", (m) => {
+      if (m === "render") this.open();
+      else if (this._running) this.close();
+    });
+    // undo/redo/paste while rendering: rebuild so the image tracks the scene
+    BT.on("history", () => this.refreshScene());
+  },
 
   open() {
+    if (this._running) return;
     const built = this._buildSceneData();
-    if (!built) return;
+    if (!built) { this._bail(); return; }
 
-    const overlay = document.getElementById("render-overlay");
     const canvas = document.getElementById("render-canvas");
-    overlay.hidden = false;
-    BT.Viewport.paused = true;
-
-    const W = Math.min(window.innerWidth, 1920);
-    const H = Math.min(window.innerHeight, 1080);
-
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, premultipliedAlpha: false });
     if (!renderer.capabilities.isWebGL2) {
       renderer.dispose();
-      this.close();
+      for (const t of built.texes) t.dispose();
       BT.emit("toast", "this browser cannot run the ray tracer (WebGL2 needed)");
+      this._bail();
       return;
     }
-    renderer.setPixelRatio(1);
-    renderer.setSize(W, H, false);
+    this._canvas = canvas;
+    canvas.hidden = false;
+    BT.Viewport.paused = true;
+    this._texes = built.texes;
     this._renderer = renderer;
+    renderer.setPixelRatio(1);
+
+    const size = this._size();
+    renderer.setSize(size.w, size.h, false);
 
     const floatOK = !!renderer.extensions.get("EXT_color_buffer_float");
-    const rtOpts = {
+    this._rtOpts = {
       type: floatOK ? THREE.FloatType : THREE.HalfFloatType,
       minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
       depthBuffer: false, stencilBuffer: false,
     };
-    this._rtA = new THREE.WebGLRenderTarget(W, H, rtOpts);
-    this._rtB = new THREE.WebGLRenderTarget(W, H, rtOpts);
-
-    const cam = BT.Viewport.camera;
-    cam.updateMatrixWorld();
-    const e = cam.matrixWorld.elements;
-
-    // start the accumulators at zero
+    this._rtA = new THREE.WebGLRenderTarget(size.w, size.h, this._rtOpts);
+    this._rtB = new THREE.WebGLRenderTarget(size.w, size.h, this._rtOpts);
     renderer.setClearColor(0x000000, 0);
-    renderer.setRenderTarget(this._rtA);
-    renderer.clear();
-    renderer.setRenderTarget(this._rtB);
-    renderer.clear();
-    renderer.setRenderTarget(null);
 
     this._traceMat = new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
       uniforms: {
         uTris: { value: built.triTex },
         uBVH: { value: built.bvhTex },
+        uLights: { value: built.lightTex },
+        uLightCount: { value: built.lightCount },
         uTriTexW: { value: built.triTexW },
         uBVHTexW: { value: built.bvhTexW },
+        uLightTexW: { value: built.lightTexW },
         uPrev: { value: null },
         uFrame: { value: 0 },
-        uRes: { value: new THREE.Vector2(W, H) },
-        uCamPos: { value: cam.position.clone() },
-        uCamRight: { value: new THREE.Vector3(e[0], e[1], e[2]) },
-        uCamUp: { value: new THREE.Vector3(e[4], e[5], e[6]) },
-        uCamFwd: { value: new THREE.Vector3(-e[8], -e[9], -e[10]) },
-        uTanFov: { value: Math.tan(cam.fov * 0.5 * Math.PI / 180) },
-        uAspect: { value: W / H },
-        uSunDir: { value: this.SUN_DIR.clone() },
+        uRes: { value: new THREE.Vector2(size.w, size.h) },
+        uCamPos: { value: new THREE.Vector3() },
+        uCamRight: { value: new THREE.Vector3() },
+        uCamUp: { value: new THREE.Vector3() },
+        uCamFwd: { value: new THREE.Vector3() },
+        uTanFov: { value: Math.tan(BT.Viewport.camera.fov * 0.5 * Math.PI / 180) },
+        uAspect: { value: size.w / size.h },
+        uBounces: { value: this.settings.bounces },
+        uSunDir: { value: new THREE.Vector3() },
+        uSunColor: { value: new THREE.Vector3() },
+        uSkyMode: { value: 0 },
+        uSkyColor: { value: new THREE.Vector3() },
+        uBgTransparent: { value: false },
+        uAperture: { value: 0 },
+        uFocusDist: { value: BT.Viewport.cam.dist },
       },
-      vertexShader: this.VERT,
-      fragmentShader: this.TRACE_FRAG,
+      vertexShader: BT.RenderShaders.VERT,
+      fragmentShader: BT.RenderShaders.TRACE_FRAG,
     });
     this._viewMat = new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
-      uniforms: { uAccum: { value: null } },
-      vertexShader: this.VERT,
-      fragmentShader: this.VIEW_FRAG,
+      uniforms: { uAccum: { value: null }, uExposure: { value: 1 }, uTransparent: { value: false } },
+      vertexShader: BT.RenderShaders.VERT,
+      fragmentShader: BT.RenderShaders.VIEW_FRAG,
     });
 
     const quad = new THREE.PlaneGeometry(2, 2);
@@ -102,9 +138,15 @@ BT.Render = {
     this._viewScene.add(viewMesh);
     this._quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
 
-    this._samples = 0;
-    this._t0 = performance.now();
     this._running = true;
+    this._paused = false;
+    this._updateCamera();
+    this._applyUniforms();
+    this._resetAccum();
+
+    this._onResize = () => { if (this._running) this._recreateTargets(); };
+    window.addEventListener("resize", this._onResize);
+
     const loop = () => {
       if (!this._running) return;
       requestAnimationFrame(loop);
@@ -113,7 +155,50 @@ BT.Render = {
     loop();
   },
 
+  close() {
+    if (!this._renderer) return;
+    this._running = false;
+    if (this._onResize) { window.removeEventListener("resize", this._onResize); this._onResize = null; }
+    document.getElementById("render-canvas").hidden = true;
+    BT.Viewport.paused = false;
+    if (this._rtA) { this._rtA.dispose(); this._rtB.dispose(); this._rtA = this._rtB = null; }
+    for (const t of this._texes) t.dispose();
+    this._texes = [];
+    if (this._traceMat) { this._traceMat.dispose(); this._viewMat.dispose(); this._traceMat = this._viewMat = null; }
+    this._renderer.dispose();
+    this._renderer = null;
+    this._traceScene = this._viewScene = null;
+    this._camSig = "";
+  },
+
+  // open() failed: fall back to object mode after the mode listeners finish
+  _bail() {
+    setTimeout(() => { if (BT.state.mode === "render") BT.setMode("object"); }, 0);
+  },
+
+  _size() {
+    const s = this.settings;
+    const cw = this._canvas && this._canvas.clientWidth || window.innerWidth;
+    const ch = this._canvas && this._canvas.clientHeight || window.innerHeight;
+    return {
+      w: Math.min(4096, Math.max(1, Math.round(cw * s.resScale))),
+      h: Math.min(4096, Math.max(1, Math.round(ch * s.resScale))),
+    };
+  },
+
+  // ---- the per-frame loop ---------------------------------------------------------
+
   _step() {
+    // the viewport loop is paused, so track its orbit state ourselves:
+    // any camera change restarts the accumulation (the BVH stays)
+    const c = BT.Viewport.cam;
+    const sig = c.theta + "," + c.phi + "," + c.dist + "," + c.target.x + "," + c.target.y + "," + c.target.z;
+    if (sig !== this._camSig) {
+      this._updateCamera();
+      this._resetAccum();
+    }
+    if (this._paused) return;
+
     const r = this._renderer;
     this._traceMat.uniforms.uFrame.value = this._samples;
     this._traceMat.uniforms.uPrev.value = this._rtA.texture;
@@ -125,34 +210,150 @@ BT.Render = {
     const t = this._rtA; this._rtA = this._rtB; this._rtB = t;
     this._samples++;
 
-    const secs = (performance.now() - this._t0) / 1000;
-    document.getElementById("render-stats").textContent =
-      this._samples.toLocaleString() + " samples · " +
-      (secs < 90 ? Math.round(secs) + "s" : (secs / 60).toFixed(1) + "min");
+    if (this.settings.target && this._samples >= this.settings.target) {
+      this._paused = true;
+      this._syncPauseBtn();
+    }
+    this._updateProgress();
+  },
+
+  _updateCamera() {
+    const vp = BT.Viewport;
+    vp._applyCamera();
+    vp.camera.updateMatrixWorld();
+    const e = vp.camera.matrixWorld.elements;
+    const u = this._traceMat.uniforms;
+    u.uCamPos.value.copy(vp.camera.position);
+    u.uCamRight.value.set(e[0], e[1], e[2]);
+    u.uCamUp.value.set(e[4], e[5], e[6]);
+    u.uCamFwd.value.set(-e[8], -e[9], -e[10]);
+    u.uFocusDist.value = this.settings.focus > 0 ? this.settings.focus : vp.cam.dist;
+    const c = vp.cam;
+    this._camSig = c.theta + "," + c.phi + "," + c.dist + "," + c.target.x + "," + c.target.y + "," + c.target.z;
+  },
+
+  _resetAccum() {
+    const r = this._renderer;
+    r.setRenderTarget(this._rtA); r.clear();
+    r.setRenderTarget(this._rtB); r.clear();
+    r.setRenderTarget(null);
+    this._samples = 0;
+    this._t0 = performance.now();
+    if (this._paused) { this._paused = false; this._syncPauseBtn(); }
+  },
+
+  _recreateTargets() {
+    const size = this._size();
+    this._rtA.dispose(); this._rtB.dispose();
+    this._rtA = new THREE.WebGLRenderTarget(size.w, size.h, this._rtOpts);
+    this._rtB = new THREE.WebGLRenderTarget(size.w, size.h, this._rtOpts);
+    this._renderer.setSize(size.w, size.h, false);
+    const u = this._traceMat.uniforms;
+    u.uRes.value.set(size.w, size.h);
+    u.uAspect.value = size.w / size.h;
+    this._resetAccum();
+  },
+
+  // ---- settings --------------------------------------------------------------------
+
+  // the panel calls this after writing settings[key]; everything is a
+  // uniform, so no setting ever recompiles a shader
+  applySettings(key) {
+    BT.IO.scheduleSave();
+    if (!this._running) return;
+    if (key === "target") { // just moves the stopping point, the samples stay
+      if (this._paused && (!this.settings.target || this._samples < this.settings.target)) {
+        this._paused = false;
+        this._syncPauseBtn();
+      }
+      this._updateProgress();
+      return;
+    }
+    if (key === "resScale") { this._recreateTargets(); return; }
+    if (key === "ground") { this.refreshScene(); return; }
+    this._applyUniforms();
+    if (key === "exposure") { this._redrawView(); return; } // view-only, keep the samples
+    this._resetAccum();
+  },
+
+  _redrawView() {
+    this._viewMat.uniforms.uAccum.value = this._rtA.texture;
+    this._renderer.setRenderTarget(null);
+    this._renderer.render(this._viewScene, this._quadCam);
+  },
+
+  _applyUniforms() {
+    const s = this.settings;
+    const u = this._traceMat.uniforms;
+    u.uBounces.value = s.bounces;
+    const el = s.sunElev * Math.PI / 180, az = s.sunAzim * Math.PI / 180;
+    u.uSunDir.value.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az));
+    const sc = this.SUN_COLORS[s.sky] || this.SUN_COLORS.day;
+    u.uSunColor.value.set(sc[0], sc[1], sc[2]).multiplyScalar(s.sunStrength);
+    u.uSkyMode.value = { day: 0, sunset: 1, night: 2, solid: 3 }[s.sky] || 0;
+    const skyC = new THREE.Color(s.skyColor).convertSRGBToLinear();
+    u.uSkyColor.value.set(skyC.r, skyC.g, skyC.b);
+    u.uBgTransparent.value = s.bgTransparent;
+    u.uAperture.value = s.aperture;
+    u.uFocusDist.value = s.focus > 0 ? s.focus : BT.Viewport.cam.dist;
+    this._viewMat.uniforms.uExposure.value = s.exposure;
+    this._viewMat.uniforms.uTransparent.value = s.bgTransparent;
+    this._canvas.classList.toggle("alpha", s.bgTransparent);
+  },
+
+  // repack the scene (ground toggle, undo/redo) without touching the shaders
+  refreshScene() {
+    if (!this._running) return;
+    const old = this._texes;
+    const built = this._buildSceneData();
+    if (!built) { this._bail(); return; }
+    this._texes = built.texes;
+    for (const t of old) t.dispose();
+    const u = this._traceMat.uniforms;
+    u.uTris.value = built.triTex;
+    u.uBVH.value = built.bvhTex;
+    u.uLights.value = built.lightTex;
+    u.uLightCount.value = built.lightCount;
+    this._resetAccum();
+  },
+
+  togglePause() {
+    this._paused = !this._paused;
+    // resuming past the sample target means "keep refining"
+    if (!this._paused && this.settings.target && this._samples >= this.settings.target) {
+      this.settings.target = 0;
+      const chips = document.getElementById("rd-target");
+      if (chips) chips.querySelectorAll(".chip").forEach((c) =>
+        c.setAttribute("aria-pressed", String(c.dataset.v === "0")));
+      BT.IO.scheduleSave();
+    }
+    this._syncPauseBtn();
+    this._updateProgress();
   },
 
   savePNG() {
     if (!this._renderer) return;
     // draw once more so the canvas is fresh in this same task, then grab it
-    this._viewMat.uniforms.uAccum.value = this._rtA.texture;
-    this._renderer.setRenderTarget(null);
-    this._renderer.render(this._viewScene, this._quadCam);
+    this._redrawView();
     const a = document.createElement("a");
     a.href = this._renderer.domElement.toDataURL("image/png");
     a.download = "blendtinux-render.png";
     a.click();
   },
 
-  close() {
-    this._running = false;
-    document.getElementById("render-overlay").hidden = true;
-    BT.Viewport.paused = false;
-    if (this._rtA) { this._rtA.dispose(); this._rtB.dispose(); this._rtA = this._rtB = null; }
-    for (const t of this._texes) t.dispose();
-    this._texes = [];
-    if (this._traceMat) { this._traceMat.dispose(); this._viewMat.dispose(); this._traceMat = this._viewMat = null; }
-    if (this._renderer) { this._renderer.dispose(); this._renderer = null; }
-    this._traceScene = this._viewScene = null;
+  _updateProgress() {
+    const el = document.getElementById("rd-progress");
+    if (!el) return;
+    const secs = (performance.now() - this._t0) / 1000;
+    const time = secs < 90 ? Math.round(secs) + "s" : (secs / 60).toFixed(1) + "min";
+    el.textContent = this._samples.toLocaleString() +
+      (this.settings.target ? " / " + this.settings.target.toLocaleString() : "") +
+      " samples · " + time + (this._paused ? " · paused" : "");
+  },
+
+  _syncPauseBtn() {
+    const b = document.getElementById("rd-pause");
+    if (b) b.textContent = this._paused ? "Resume" : "Pause";
   },
 
   // ---- scene packing -----------------------------------------------------------
@@ -162,7 +363,7 @@ BT.Render = {
     if (!objs.length) { BT.emit("toast", "nothing to render yet"); return null; }
 
     // gather world-space triangles
-    const tris = []; // {p:[9], n:[9], c:[9], kind, rough, emis, flat}
+    const tris = []; // {p:[9], n:[9], c:[9], kind, rough, emis, metal, dens, flat}
     const v = new THREE.Vector3();
     for (const obj of objs) {
       obj.mesh.updateMatrixWorld();
@@ -174,11 +375,13 @@ BT.Render = {
       const colAttr = g.getAttribute("color");
       const idx = g.index.array;
       const fin = BT.Mesh.FINISHES[obj.finish];
-      const base = new THREE.Color(fin.tint || obj.color).convertSRGBToLinear();
+      const base = new THREE.Color(obj.color).convertSRGBToLinear();
       const kind = fin.kind, rough = fin.roughness;
+      const metal = fin.metalness || 0, dens = fin.density || 0;
+      const pat = fin.pattern || 0;
       const emis = fin.emissive ? fin.emissive * 2.4 : 0;
       for (let f = 0; f < idx.length; f += 3) {
-        const t = { p: [], n: [], c: [], kind, rough, emis, flat: obj.flat ? 1 : 0 };
+        const t = { p: [], n: [], c: [], kind, rough, emis, metal, dens, pat, flat: obj.flat ? 1 : 0 };
         for (let k = 0; k < 3; k++) {
           const vi = idx[f + k];
           v.fromArray(pos, vi * 3).applyMatrix4(m);
@@ -194,12 +397,14 @@ BT.Render = {
     if (tris.length > 400000) { BT.emit("toast", "scene too heavy to ray trace (400k triangles max)"); return null; }
 
     // studio ground
-    const G = 60, gc = [0.055, 0.055, 0.062];
-    const ground = [
-      { p: [-G, 0, -G, -G, 0, G, G, 0, G], n: [0, 1, 0, 0, 1, 0, 0, 1, 0], c: [...gc, ...gc, ...gc], kind: 0, rough: 0.85, emis: 0, flat: 1 },
-      { p: [-G, 0, -G, G, 0, G, G, 0, -G], n: [0, 1, 0, 0, 1, 0, 0, 1, 0], c: [...gc, ...gc, ...gc], kind: 0, rough: 0.85, emis: 0, flat: 1 },
-    ];
-    for (const t of ground) tris.push(t);
+    if (this.settings.ground) {
+      const G = 60, gc = [0.055, 0.055, 0.062];
+      const ground = [
+        { p: [-G, 0, -G, -G, 0, G, G, 0, G], n: [0, 1, 0, 0, 1, 0, 0, 1, 0], c: [...gc, ...gc, ...gc], kind: 0, rough: 0.85, emis: 0, metal: 0, dens: 0, pat: 0, flat: 1 },
+        { p: [-G, 0, -G, G, 0, G, G, 0, -G], n: [0, 1, 0, 0, 1, 0, 0, 1, 0], c: [...gc, ...gc, ...gc], kind: 0, rough: 0.85, emis: 0, metal: 0, dens: 0, pat: 0, flat: 1 },
+      ];
+      for (const t of ground) tris.push(t);
+    }
 
     // BVH over triangle centroids, leaves get contiguous runs
     const order = tris.map((_, i) => i);
@@ -261,9 +466,9 @@ BT.Render = {
       put(1, t.p[3], t.p[4], t.p[5], t.rough);
       put(2, t.p[6], t.p[7], t.p[8], t.emis);
       put(3, t.n[0], t.n[1], t.n[2], t.flat);
-      put(4, t.n[3], t.n[4], t.n[5], 0);
-      put(5, t.n[6], t.n[7], t.n[8], 0);
-      put(6, t.c[0], t.c[1], t.c[2], 0);
+      put(4, t.n[3], t.n[4], t.n[5], t.metal);
+      put(5, t.n[6], t.n[7], t.n[8], t.dens);
+      put(6, t.c[0], t.c[1], t.c[2], t.pat);
       put(7, t.c[3], t.c[4], t.c[5], 0);
       put(8, t.c[6], t.c[7], t.c[8], 0);
     }
@@ -280,247 +485,33 @@ BT.Render = {
     const bvhTex = new THREE.DataTexture(bvhData, TW, bvhTexH, THREE.RGBAFormat, THREE.FloatType);
     bvhTex.needsUpdate = true;
 
-    this._texes = [triTex, bvhTex];
-    return { triTex, bvhTex, triTexW: TW, bvhTexW: TW };
+    // glowing triangles become explicit lights: (index in BVH order, area)
+    const lights = [];
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[order[i]];
+      if (t.emis <= 0) continue;
+      const e1x = t.p[3] - t.p[0], e1y = t.p[4] - t.p[1], e1z = t.p[5] - t.p[2];
+      const e2x = t.p[6] - t.p[0], e2y = t.p[7] - t.p[1], e2z = t.p[8] - t.p[2];
+      const cx = e1y * e2z - e1z * e2y, cy = e1z * e2x - e1x * e2z, cz = e1x * e2y - e1y * e2x;
+      const area = 0.5 * Math.sqrt(cx * cx + cy * cy + cz * cz);
+      if (area > 1e-8) lights.push(i, area);
+    }
+    const lightCount = lights.length / 2;
+    const lightTexH = Math.max(1, Math.ceil(lightCount / TW));
+    const lightData = new Float32Array(TW * lightTexH * 4);
+    for (let i = 0; i < lightCount; i++) {
+      lightData[i * 4] = lights[i * 2];
+      lightData[i * 4 + 1] = lights[i * 2 + 1];
+    }
+    const lightTex = new THREE.DataTexture(lightData, TW, lightTexH, THREE.RGBAFormat, THREE.FloatType);
+    lightTex.needsUpdate = true;
+
+    return {
+      triTex, bvhTex, lightTex, lightCount,
+      triTexW: TW, bvhTexW: TW, lightTexW: TW,
+      texes: [triTex, bvhTex, lightTex],
+    };
   },
-
-  // ---- shaders -------------------------------------------------------------------
-
-  VERT: [
-    "precision highp float;",
-    "in vec3 position;",
-    "in vec2 uv;",
-    "out vec2 vUv;",
-    "void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }",
-  ].join("\n"),
-
-  TRACE_FRAG: `
-precision highp float;
-precision highp int;
-precision highp sampler2D;
-in vec2 vUv;
-out vec4 outColor;
-
-uniform sampler2D uTris, uBVH, uPrev;
-uniform int uTriTexW, uBVHTexW, uFrame;
-uniform vec2 uRes;
-uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd, uSunDir;
-uniform float uTanFov, uAspect;
-
-uint seed;
-float rnd() {
-  seed = seed * 747796405u + 2891336453u;
-  uint t = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
-  t = (t >> 22u) ^ t;
-  return float(t) / 4294967295.0;
-}
-
-vec4 triTexel(int i) {
-  return texelFetch(uTris, ivec2(i % uTriTexW, i / uTriTexW), 0);
-}
-vec4 bvhTexel(int i) {
-  return texelFetch(uBVH, ivec2(i % uBVHTexW, i / uBVHTexW), 0);
-}
-
-float rayBox(vec3 ro, vec3 inv, vec3 bmin, vec3 bmax, float tMax) {
-  vec3 t0 = (bmin - ro) * inv, t1 = (bmax - ro) * inv;
-  vec3 lo = min(t0, t1), hi = max(t0, t1);
-  float tn = max(max(lo.x, lo.y), lo.z);
-  float tf = min(min(hi.x, hi.y), hi.z);
-  return (tf >= max(tn, 0.0) && tn < tMax) ? tn : 1e30;
-}
-
-// Moller-Trumbore, both sides
-float rayTri(vec3 ro, vec3 rd, vec3 a, vec3 b, vec3 c, out float u, out float v) {
-  vec3 e1 = b - a, e2 = c - a;
-  vec3 p = cross(rd, e2);
-  float det = dot(e1, p);
-  if (abs(det) < 1e-9) return 1e30;
-  float inv = 1.0 / det;
-  vec3 s = ro - a;
-  u = dot(s, p) * inv;
-  if (u < 0.0 || u > 1.0) return 1e30;
-  vec3 q = cross(s, e1);
-  v = dot(rd, q) * inv;
-  if (v < 0.0 || u + v > 1.0) return 1e30;
-  float t = dot(e2, q) * inv;
-  return t > 1e-4 ? t : 1e30;
-}
-
-struct Hit { float t; int tri; float u; float v; };
-
-bool traverse(vec3 ro, vec3 rd, float tMax, bool any, out Hit hit) {
-  hit.t = tMax; hit.tri = -1;
-  vec3 inv = 1.0 / rd;
-  int stack[28];
-  int sp = 0;
-  stack[0] = 0;
-  while (sp >= 0) {
-    int ni = stack[sp--];
-    vec4 A = bvhTexel(ni * 2);
-    vec4 B = bvhTexel(ni * 2 + 1);
-    if (rayBox(ro, inv, A.xyz, B.xyz, hit.t) >= hit.t) continue;
-    if (A.w < 0.0) {
-      int start = int(-A.w) - 1;
-      int count = int(B.w);
-      for (int k = 0; k < count; k++) {
-        int ti = (start + k) * 9;
-        vec3 pa = triTexel(ti).xyz, pb = triTexel(ti + 1).xyz, pc = triTexel(ti + 2).xyz;
-        float u, v;
-        float t = rayTri(ro, rd, pa, pb, pc, u, v);
-        if (t < hit.t) {
-          hit.t = t; hit.tri = start + k; hit.u = u; hit.v = v;
-          if (any) return true;
-        }
-      }
-    } else {
-      if (sp < 26) {
-        stack[++sp] = int(A.w);
-        stack[++sp] = int(B.w);
-      }
-    }
-  }
-  return hit.tri >= 0;
-}
-
-vec3 sky(vec3 d, bool spec) {
-  float t = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
-  vec3 s = mix(vec3(0.045, 0.045, 0.055), vec3(0.30, 0.36, 0.50), pow(t, 1.4));
-  if (spec) s += vec3(10.0, 9.0, 7.4) * smoothstep(0.9993, 0.9999, dot(d, uSunDir)) * 90.0;
-  return s;
-}
-
-vec3 cosineDir(vec3 n) {
-  float r1 = rnd(), r2 = rnd();
-  float phi = 6.2831853 * r1;
-  float sr = sqrt(r2);
-  vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0, 1, 0)) : cross(n, vec3(1, 0, 0)));
-  vec3 b = cross(n, t);
-  return normalize(t * (cos(phi) * sr) + b * (sin(phi) * sr) + n * sqrt(1.0 - r2));
-}
-
-vec3 sphereDir() {
-  float z = rnd() * 2.0 - 1.0;
-  float phi = 6.2831853 * rnd();
-  float r = sqrt(max(0.0, 1.0 - z * z));
-  return vec3(r * cos(phi), r * sin(phi), z);
-}
-
-void main() {
-  ivec2 px = ivec2(gl_FragCoord.xy);
-  seed = uint(px.x) * 1973u + uint(px.y) * 9277u + uint(uFrame) * 26699u + 1u;
-
-  vec2 jitter = vec2(rnd(), rnd());
-  vec2 ndc = ((vec2(px) + jitter) / uRes) * 2.0 - 1.0;
-  vec3 rd = normalize(uCamFwd + uCamRight * ndc.x * uTanFov * uAspect + uCamUp * ndc.y * uTanFov);
-  vec3 ro = uCamPos;
-
-  vec3 radiance = vec3(0.0);
-  vec3 throughput = vec3(1.0);
-  bool specBounce = true;
-
-  for (int bounce = 0; bounce < 6; bounce++) {
-    Hit hit;
-    if (!traverse(ro, rd, 1e30, false, hit)) {
-      radiance += throughput * sky(rd, specBounce);
-      break;
-    }
-
-    int ti = hit.tri * 9;
-    vec4 t0 = triTexel(ti), t1 = triTexel(ti + 1), t2 = triTexel(ti + 2);
-    vec4 t3 = triTexel(ti + 3), t4 = triTexel(ti + 4), t5 = triTexel(ti + 5);
-    int kind = int(t0.w);
-    float rough = t1.w;
-    float emis = t2.w;
-    float w0 = 1.0 - hit.u - hit.v;
-    vec3 albedo = triTexel(ti + 6).rgb * w0 + triTexel(ti + 7).rgb * hit.u + triTexel(ti + 8).rgb * hit.v;
-    vec3 n;
-    if (t3.w > 0.5) n = normalize(cross(t1.xyz - t0.xyz, t2.xyz - t0.xyz));
-    else n = normalize(t3.xyz * w0 + t4.xyz * hit.u + t5.xyz * hit.v);
-    bool inside = dot(n, rd) > 0.0;
-    if (inside) n = -n;
-
-    vec3 p = ro + rd * hit.t;
-
-    if (emis > 0.0) radiance += throughput * albedo * emis;
-
-    if (kind == 2) { // glass
-      float ior = inside ? 1.5 : 1.0 / 1.5;
-      float cosi = -dot(rd, n);
-      float f0 = 0.04;
-      float fres = f0 + (1.0 - f0) * pow(1.0 - cosi, 5.0);
-      vec3 refr = refract(rd, n, ior);
-      vec3 dir;
-      if (length(refr) < 0.5 || rnd() < fres) dir = reflect(rd, n);
-      else { dir = refr; throughput *= mix(albedo, vec3(1.0), 0.5); }
-      dir = normalize(dir + sphereDir() * rough * 0.35);
-      ro = p + dir * 1e-4;
-      rd = dir;
-      specBounce = true;
-      continue;
-    }
-
-    bool doSpec = false;
-    if (kind == 1) doSpec = true; // metal
-    else if (kind == 0 || kind == 3) {
-      float cosi = -dot(rd, n);
-      float fres = 0.04 + 0.96 * pow(1.0 - cosi, 5.0);
-      doSpec = rnd() < fres * (1.0 - rough); // plastic coat
-    }
-
-    if (doSpec) {
-      vec3 dir = normalize(reflect(rd, n) + sphereDir() * rough * rough);
-      if (dot(dir, n) <= 0.0) dir = reflect(rd, n);
-      if (kind == 1) throughput *= albedo;
-      ro = p + n * 1e-4;
-      rd = dir;
-      specBounce = true;
-    } else {
-      // direct sun with soft shadows
-      vec3 sd = normalize(uSunDir + sphereDir() * 0.012);
-      float ndl = dot(n, sd);
-      if (ndl > 0.0) {
-        Hit sh;
-        if (!traverse(p + n * 1e-4, sd, 1e30, true, sh)) {
-          radiance += throughput * albedo * ndl * vec3(2.6, 2.35, 2.0);
-        }
-      }
-      throughput *= albedo;
-      ro = p + n * 1e-4;
-      rd = cosineDir(n);
-      specBounce = false;
-    }
-
-    // russian roulette
-    if (bounce > 2) {
-      float q = max(throughput.r, max(throughput.g, throughput.b));
-      if (rnd() > q) break;
-      throughput /= max(q, 1e-4);
-    }
-  }
-
-  radiance = clamp(radiance, 0.0, 60.0);
-  vec4 prev = texelFetch(uPrev, px, 0);
-  outColor = vec4(prev.rgb + radiance, prev.a + 1.0);
-}
-`,
-
-  VIEW_FRAG: `
-precision highp float;
-in vec2 vUv;
-out vec4 outColor;
-uniform sampler2D uAccum;
-
-vec3 aces(vec3 x) {
-  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
-}
-
-void main() {
-  vec4 acc = texelFetch(uAccum, ivec2(gl_FragCoord.xy), 0);
-  vec3 c = acc.rgb / max(acc.a, 1.0);
-  c = aces(c * 1.15);
-  c = pow(c, vec3(1.0 / 2.2));
-  outColor = vec4(c, 1.0);
-}
-`,
 };
+
+BT.Render.settings = Object.assign({}, BT.Render.DEFAULTS);

@@ -17,6 +17,7 @@
 
 <div id="app">
   <canvas id="view" aria-label="3D viewport"></canvas>
+  <canvas id="render-canvas" aria-label="ray-traced render" hidden></canvas>
 
   <header id="topbar">
     <a id="home" href="/" data-tip="Back to tinux.dev">
@@ -24,6 +25,10 @@
       <span class="wordmark">BlendTinux</span>
     </a>
     <div class="top-group">
+      <div class="menuwrap">
+        <button id="proj-btn" class="pbtn" data-tip="Your projects: open, rename, create or delete"></button>
+        <div id="proj-menu" class="menu" hidden></div>
+      </div>
       <div class="menuwrap">
         <button id="add-btn" class="pbtn accentbtn" data-tip="Add a shape to the scene">+ Add</button>
         <div id="add-menu" class="menu" hidden></div>
@@ -34,12 +39,13 @@
       <button id="undo-btn" class="tbtn" data-tip="Undo (Ctrl+Z)" aria-label="Undo" disabled></button>
       <button id="redo-btn" class="tbtn" data-tip="Redo (Ctrl+Y)" aria-label="Redo" disabled></button>
       <span class="vsep"></span>
-      <button id="render-btn" class="pbtn" data-tip="ray-traced render: real light bounces, refines the longer it runs">Render</button>
       <button id="import-btn" class="pbtn" data-tip="Open an .obj file from your computer">Import</button>
       <div class="menuwrap">
         <button id="export-btn" class="pbtn" data-tip="Save your model as a file">Export</button>
         <div id="export-menu" class="menu" hidden></div>
       </div>
+      <span class="vsep"></span>
+      <button id="mcp-btn" class="tbtn" aria-label="MCP connection" aria-pressed="false"></button>
       <input id="import-file" type="file" accept=".obj" hidden />
     </div>
   </header>
@@ -57,14 +63,6 @@
   <div id="ctxmenu" class="menu" hidden></div>
   <svg id="knife" aria-hidden="true" hidden></svg>
 
-  <div id="render-overlay" hidden>
-    <canvas id="render-canvas"></canvas>
-    <div id="render-bar">
-      <span id="render-stats" class="mono">warming up...</span>
-      <button id="render-save" class="pbtn accentbtn">Save PNG</button>
-      <button id="render-close" class="pbtn" data-tip="Esc">Close</button>
-    </div>
-  </div>
   <div id="hint" class="pill" hidden></div>
   <div id="status" class="pill mono" hidden></div>
   <div id="toasts" aria-live="polite"></div>
@@ -80,6 +78,8 @@
 <script src="js/vertex.js"></script>
 <script src="js/deform.js"></script>
 <script src="js/io.js"></script>
+<script src="js/mcp.js"></script>
+<script src="js/render-shaders.js"></script>
 <script src="js/render.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/app.js"></script>

@@ -12,19 +12,28 @@
 BT.Mesh = {
 
   /* Viewport look for each finish; the ray tracer maps them to real BSDFs
-     (kind: 0 diffuse/coat, 1 metal, 2 glass, 3 glow). */
+     (kind: 0 diffuse/coat, 1 metal, 2 glass, 3 glow). `pattern` is procedural
+     grain the ray tracer shades into the surface (1 wood, 2 stone, 3 marble).
+     `tint` is only a suggested color: picking the chip sets it, the color
+     picker keeps working afterwards. */
   FINISHES: {
-    matte:   { metalness: 0,   roughness: 0.9,  kind: 0 },
-    plastic: { metalness: 0,   roughness: 0.55, kind: 0 },
-    glossy:  { metalness: 0,   roughness: 0.22, kind: 0 },
-    satin:   { metalness: 0.2, roughness: 0.6,  kind: 0 },
-    metal:   { metalness: 1,   roughness: 0.35, kind: 1 },
-    chrome:  { metalness: 1,   roughness: 0.05, kind: 1 },
-    gold:    { metalness: 1,   roughness: 0.2,  kind: 1, tint: "#e8b34a" },
-    glass:   { metalness: 0,   roughness: 0.04, kind: 2, opacity: 0.35 },
-    frosted: { metalness: 0,   roughness: 0.45, kind: 2, opacity: 0.55 },
-    glow:    { metalness: 0,   roughness: 0.6,  kind: 3, emissive: 1.4 },
+    matte:   { metalness: 0, roughness: 0.9,  kind: 0 },
+    plastic: { metalness: 0, roughness: 0.3,  kind: 0 },
+    ceramic: { metalness: 0, roughness: 0.12, kind: 0 },
+    wood:    { metalness: 0, roughness: 0.62, kind: 0, pattern: 1, tint: "#9a6a43" },
+    stone:   { metalness: 0, roughness: 0.85, kind: 0, pattern: 2, tint: "#8f8d88" },
+    marble:  { metalness: 0, roughness: 0.18, kind: 0, pattern: 3, tint: "#e6e3dd" },
+    metal:   { metalness: 1, roughness: 0.35, kind: 1 },
+    chrome:  { metalness: 1, roughness: 0.05, kind: 1 },
+    gold:    { metalness: 1, roughness: 0.2,  kind: 1, tint: "#e8b34a" },
+    copper:  { metalness: 1, roughness: 0.25, kind: 1, tint: "#c97a4e" },
+    glass:   { metalness: 0, roughness: 0.04, kind: 2, opacity: 0.35, density: 0.8 },
+    frosted: { metalness: 0, roughness: 0.45, kind: 2, opacity: 0.55, density: 0.35 },
+    glow:    { metalness: 0, roughness: 0.6,  kind: 3, emissive: 1.4 },
   },
+  // finishes from older saves map onto the closest current one
+  FINISH_ALIASES: { glossy: "plastic", satin: "plastic", brushed: "metal", mirror: "chrome", tinted: "glass", neon: "glow" },
+  normalizeFinish(f) { return this.FINISHES[f] ? f : (this.FINISH_ALIASES[f] || "matte"); },
   DEFAULT_COLOR: "#b8b0a6",
 
   _applyFinish(material, finish, colorHex, hasVertexColors) {
@@ -36,7 +45,7 @@ BT.Mesh = {
     material.opacity = fin.opacity || 1;
     material.depthWrite = !fin.opacity;
     if (!hasVertexColors) {
-      material.color = new THREE.Color(fin.tint || colorHex).convertSRGBToLinear();
+      material.color = new THREE.Color(colorHex).convertSRGBToLinear();
     }
     if (fin.emissive) {
       material.emissive = new THREE.Color(colorHex).convertSRGBToLinear();
@@ -171,7 +180,7 @@ BT.Mesh = {
   },
 
   createObject(opts) {
-    const finish = this.FINISHES[opts.finish] ? opts.finish : "matte";
+    const finish = this.normalizeFinish(opts.finish);
     const geometry = this.buildGeometry(opts.data);
     const material = new THREE.MeshStandardMaterial({
       flatShading: !!opts.flat,
@@ -226,7 +235,7 @@ BT.Mesh = {
 
   applyMaterialProps(obj, props) {
     obj.color = props.color;
-    obj.finish = this.FINISHES[props.finish] ? props.finish : "matte";
+    obj.finish = this.normalizeFinish(props.finish);
     obj.flat = props.flat;
     const m = obj.mesh.material;
     this._applyFinish(m, obj.finish, props.color, m.vertexColors);

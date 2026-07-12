@@ -40,6 +40,9 @@ BT.UI = {
     inset: '<rect x="2.5" y="2.5" width="11" height="11" rx="1"/><rect x="6" y="6" width="4" height="4" rx=".5"/>',
     center: '<circle cx="8" cy="8" r="2"/><path d="M8 1.5v3M8 11.5v3M1.5 8h3M11.5 8h3"/>',
     copy: '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 2.5h-7a1 1 0 0 0-1 1v7"/>',
+    render: '<rect x="1.8" y="4.6" width="12.4" height="9" rx="1.6"/><path d="M5.4 4.6 6.6 2.6h2.8l1.2 2"/><circle cx="8" cy="9.1" r="2.5"/>',
+    pencil: '<path d="m3 13 .8-3.1L10.9 2.8a1.15 1.15 0 0 1 1.65 0l.65.65a1.15 1.15 0 0 1 0 1.65L6.1 12.2 3 13Z"/><path d="m9.8 3.9 2.3 2.3" opacity=".7"/>',
+    plug: '<path d="M5.5 1.5v3.5M10.5 1.5v3.5"/><path d="M3.5 5h9v2.7a4.5 4.5 0 0 1-9 0Z"/><path d="M8 12.2v2.3"/>',
     paste: '<rect x="3" y="3.5" width="10" height="11" rx="1.5"/><path d="M6 3.5V2h4v1.5"/><path d="M6 8h4M6 10.7h4" opacity=".7"/>',
   },
 
@@ -60,8 +63,9 @@ BT.UI = {
     pinch: "gather vertices together, Ctrl spreads",
   },
   FINISH_LABELS: [
-    ["matte", "Matte"], ["plastic", "Plastic"], ["glossy", "Glossy"], ["satin", "Satin"],
-    ["metal", "Metal"], ["chrome", "Chrome"], ["gold", "Gold"],
+    ["matte", "Matte"], ["plastic", "Plastic"], ["ceramic", "Ceramic"],
+    ["wood", "Wood"], ["stone", "Stone"], ["marble", "Marble"],
+    ["metal", "Metal"], ["chrome", "Chrome"], ["gold", "Gold"], ["copper", "Copper"],
     ["glass", "Glass"], ["frosted", "Frosted"], ["glow", "Glow"],
   ],
   SWATCHES: ["#f0924f", "#e0685f", "#e8c15a", "#8fc866", "#5fb8ae", "#5f96d9", "#9b7fd4", "#e8e6e3"],
@@ -93,7 +97,8 @@ BT.UI = {
     BT.on("mode", () => { this.renderPanel(); this._syncGizmoSwitch(); this._syncModeSwitch(); this._onModeHints(); });
     BT.on("objects", () => { this.renderPanel(); this.updateStatus(); this.refreshOutliner(); });
     BT.on("geometry", () => { this.renderPanel(); this.updateStatus(); });
-    BT.on("material", () => { this.renderPanel(); this.refreshOutliner(); });
+    BT.on("material", () => { this._syncMaterialUI(); this.refreshOutliner(); });
+    BT.on("project", () => { this.syncProjectUI(); this.renderPanel(); this.updateStatus(); this.refreshOutliner(); this._syncModeSwitch(); this._syncGizmoSwitch(); });
     BT.on("deform", () => this.renderPanel());
     BT.on("gizmoMode", () => this._syncGizmoSwitch());
     BT.on("brush", () => this._syncBrushReadout());
@@ -117,6 +122,7 @@ BT.UI = {
 
   _buildTopbar() {
     const e = this._els;
+    this._buildProjectMenu();
     e.undo.innerHTML = this.ic("undo");
     e.redo.innerHTML = this.ic("redo");
     e.undo.addEventListener("click", () => BT.History.undo());
@@ -143,9 +149,20 @@ BT.UI = {
       else BT.IO.exportPLY();
     });
 
-    document.getElementById("render-btn").addEventListener("click", () => BT.Render.open());
-    document.getElementById("render-save").addEventListener("click", () => BT.Render.savePNG());
-    document.getElementById("render-close").addEventListener("click", () => BT.Render.close());
+    const mcp = document.getElementById("mcp-btn");
+    mcp.innerHTML = this.ic("plug");
+    mcp.addEventListener("click", () => BT.MCP.toggle());
+    const syncMcp = () => {
+      mcp.setAttribute("aria-pressed", String(BT.MCP.connected));
+      mcp.classList.toggle("waiting", BT.MCP.enabled && !BT.MCP.connected);
+      mcp.dataset.tip = BT.MCP.connected
+        ? "MCP connected, click to turn it off"
+        : BT.MCP.enabled
+          ? "MCP is on, waiting for the local server (see mcp/README.md)"
+          : "Let an AI assistant control BlendTinux over MCP (runs on your machine only)";
+    };
+    BT.on("mcp", syncMcp);
+    syncMcp();
 
     document.getElementById("import-btn").addEventListener("click", () => e.importFile.click());
     e.importFile.addEventListener("change", () => {
@@ -156,6 +173,89 @@ BT.UI = {
       reader.readAsText(file);
       e.importFile.value = "";
     });
+  },
+
+  // ---- project menu ------------------------------------------------------------
+
+  _buildProjectMenu() {
+    const btn = document.getElementById("proj-btn");
+    const menu = document.getElementById("proj-menu");
+    const close = () => { menu.hidden = true; document.removeEventListener("pointerdown", onDoc, true); };
+    const onDoc = (ev) => { if (!menu.contains(ev.target) && ev.target !== btn) close(); };
+    btn.addEventListener("click", () => {
+      if (!menu.hidden) { close(); return; }
+      this._renderProjectMenu();
+      menu.hidden = false;
+      document.addEventListener("pointerdown", onDoc, true);
+    });
+    this._projMenuClose = close;
+
+    menu.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-act=new]")) { close(); BT.IO.newProject(); return; }
+      const row = ev.target.closest(".mrow");
+      if (!row) return;
+      const id = row.dataset.id;
+      if (ev.target.closest(".mren")) { this._startProjectRename(row, id); return; }
+      const del = ev.target.closest(".mdel");
+      if (del) {
+        if (del.classList.contains("confirm")) {
+          BT.IO.deleteProject(id);
+          this._renderProjectMenu();
+        } else {
+          del.classList.add("confirm");
+          del.textContent = "sure?";
+          setTimeout(() => {
+            if (menu.contains(del)) { del.classList.remove("confirm"); del.innerHTML = this.ic("trash"); }
+          }, 2500);
+        }
+        return;
+      }
+      if (ev.target.closest(".mopen")) { close(); BT.IO.switchProject(id); }
+    });
+  },
+
+  syncProjectUI() {
+    const cur = BT.IO.currentProject();
+    document.getElementById("proj-btn").innerHTML =
+      this._esc(cur ? cur.name : "untitled") + '<span class="caret">▾</span>';
+    document.title = (cur ? cur.name + " · " : "") + "BlendTinux";
+  },
+
+  _renderProjectMenu() {
+    const menu = document.getElementById("proj-menu");
+    const cur = BT.IO.currentProject();
+    menu.innerHTML =
+      '<button data-act="new">' + this.ic("duplicate") + "New project</button>" +
+      '<div class="msep"></div>' +
+      BT.IO.listProjects().map((p) =>
+        '<div class="mrow' + (cur && p.id === cur.id ? " cur" : "") + '" data-id="' + p.id + '">' +
+        '<button class="mopen">' + this._esc(p.name) + "</button>" +
+        '<button class="mact mren" aria-label="rename ' + this._esc(p.name) + '">' + this.ic("pencil") + "</button>" +
+        '<button class="mact mdel" aria-label="delete ' + this._esc(p.name) + '">' + this.ic("trash") + "</button>" +
+        "</div>").join("");
+  },
+
+  _startProjectRename(row, id) {
+    const proj = BT.IO.listProjects().find((p) => p.id === id);
+    if (!proj) return;
+    row.querySelector(".mopen").outerHTML = '<input class="mrename" type="text" aria-label="project name">';
+    const inp = row.querySelector(".mrename");
+    inp.value = proj.name;
+    inp.focus();
+    inp.select();
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) BT.IO.renameProject(id, inp.value);
+      this._renderProjectMenu();
+    };
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") finish(true);
+      else if (e.key === "Escape") finish(false);
+    });
+    inp.addEventListener("blur", () => finish(true));
   },
 
   _wireMenu(btnId, menu, onPick) {
@@ -181,6 +281,7 @@ BT.UI = {
       ["sculpt", "Sculpt", "push and pull the surface (2)"],
       ["paint", "Paint", "brush colors onto the surface (3)"],
       ["vertex", "Verts", "see and move single vertices (4)"],
+      ["render", "Render", "ray-traced view: real light bounces, refines the longer it runs (5)"],
     ];
     this._els.modeSwitch.innerHTML = modes.map(([k, label, tip]) =>
       '<button role="radio" data-mode="' + k + '" data-tip="' + tip + '" aria-label="' + label + '">' + this.ic(k) + '<span class="seg-label">' + label + "</span></button>").join("");
@@ -195,7 +296,7 @@ BT.UI = {
     const hasSel = !!BT.state.selected || BT.state.objects.length === 1;
     this._els.modeSwitch.querySelectorAll("button").forEach((b) => {
       b.setAttribute("aria-checked", String(b.dataset.mode === BT.state.mode));
-      if (b.dataset.mode !== "object") b.disabled = !hasSel;
+      if (b.dataset.mode !== "object" && b.dataset.mode !== "render") b.disabled = !hasSel;
     });
   },
 
@@ -469,9 +570,107 @@ BT.UI = {
       this._renderSculptPanel(p);
     } else if (mode === "paint") {
       this._renderPaintPanel(p);
+    } else if (mode === "render") {
+      this._renderRenderPanel(p);
     } else {
       this._renderVertexPanel(p);
     }
+  },
+
+  _renderRenderPanel(p) {
+    const s = BT.Render.settings;
+    const chips = (id, items, cur) =>
+      '<div class="chips" id="' + id + '">' + items.map(([v, label, tip]) =>
+        '<button class="chip" data-v="' + v + '"' + (tip ? ' data-tip="' + tip + '"' : "") +
+        ' aria-pressed="' + (String(cur) === String(v)) + '">' + label + "</button>").join("") + "</div>";
+    const slider = (id, label, min, max, step, val, tip) =>
+      '<div class="slider-row"><label' + (tip ? ' data-tip="' + tip + '"' : "") + ">" + label + "</label>" +
+      '<input type="range" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + val + '">' +
+      '<span class="sval" id="' + id + '-val"></span></div>';
+    const trow = (id, label, on) =>
+      '<div class="trow"><span>' + label + '</span><button class="toggle" id="' + id + '" aria-pressed="' + on + '" aria-label="' + label + '"></button></div>';
+    const focusVal = s.focus > 0 ? s.focus : Math.round(BT.Viewport.cam.dist * 10) / 10;
+
+    p.innerHTML =
+      '<div class="psec"><div class="plabel">Render</div>' +
+      '<div class="pempty mono" id="rd-progress">warming up…</div>' +
+      '<div class="agrid" style="margin-top:10px">' +
+      '<button class="abtn" id="rd-pause">Pause</button>' +
+      '<button class="abtn primary" id="rd-save">Save PNG</button>' +
+      "</div></div>" +
+
+      '<div class="psec"><div class="plabel">Quality</div>' +
+      '<div class="prow"><label>samples</label>' +
+      chips("rd-target", [[200, "Draft", "stops at 200 samples"], [1000, "Good", "stops at 1,000 samples"], [5000, "Best", "stops at 5,000 samples"], [0, "∞", "keeps refining until you pause"]], s.target) + "</div>" +
+      slider("rd-bounces", "bounces", 2, 10, 1, s.bounces, "how many times light may bounce; more = brighter interiors, slower") +
+      '<div class="prow"><label>size</label>' +
+      chips("rd-res", [[0.5, "0.5×"], [1, "1×"], [2, "2×"]], s.resScale) + "</div></div>" +
+
+      '<div class="psec"><div class="plabel">Light</div>' +
+      slider("rd-elev", "sun height", 5, 90, 1, s.sunElev) +
+      slider("rd-azim", "direction", 0, 360, 1, s.sunAzim) +
+      slider("rd-sun", "strength", 0, 3, 0.05, s.sunStrength) +
+      '<div class="prow"><label>sky</label>' +
+      chips("rd-sky", [["day", "Day"], ["sunset", "Sunset"], ["night", "Night"], ["solid", "Solid"]], s.sky) + "</div>" +
+      (s.sky === "solid" ? '<div class="prow"><label>color</label><input type="color" id="rd-skycolor" value="' + s.skyColor + '"></div>' : "") +
+      trow("rd-alpha", "transparent background", s.bgTransparent) + "</div>" +
+
+      '<div class="psec"><div class="plabel">Scene</div>' +
+      trow("rd-ground", "ground plane", s.ground) +
+      slider("rd-exposure", "exposure", 0.3, 3, 0.05, s.exposure) + "</div>" +
+
+      '<div class="psec"><div class="plabel">Camera</div>' +
+      slider("rd-aperture", "blur", 0, 0.25, 0.005, s.aperture, "depth of field: 0 keeps everything sharp") +
+      slider("rd-focus", "focus", 0.5, 20, 0.1, focusVal, "distance that stays sharp; starts at the orbit target") + "</div>" +
+
+      '<div class="pempty">drag to orbit, the image restarts itself · <span class="kbd">Esc</span> goes back to modelling</div>';
+
+    const set = (key, val) => { BT.Render.settings[key] = val; BT.Render.applySettings(key); };
+    const bindChips = (id, key, parse) => {
+      const el = p.querySelector("#" + id);
+      el.addEventListener("click", (ev) => {
+        const b = ev.target.closest(".chip");
+        if (!b) return;
+        el.querySelectorAll(".chip").forEach((c) => c.setAttribute("aria-pressed", String(c === b)));
+        set(key, parse ? parse(b.dataset.v) : b.dataset.v);
+        if (key === "sky") this.renderPanel(); // the color row appears only for Solid
+      });
+    };
+    const bindSlider = (id, key, fmt) => {
+      const inp = p.querySelector("#" + id);
+      const out = p.querySelector("#" + id + "-val");
+      const show = () => { out.textContent = fmt(parseFloat(inp.value)); };
+      show();
+      inp.addEventListener("input", () => { show(); set(key, parseFloat(inp.value)); });
+    };
+    const bindToggle = (id, key) => {
+      const b = p.querySelector("#" + id);
+      b.addEventListener("click", () => {
+        const v = !BT.Render.settings[key];
+        b.setAttribute("aria-pressed", String(v));
+        set(key, v);
+      });
+    };
+
+    bindChips("rd-target", "target", (v) => +v);
+    bindChips("rd-res", "resScale", (v) => +v);
+    bindChips("rd-sky", "sky");
+    bindSlider("rd-bounces", "bounces", (v) => String(Math.round(v)));
+    bindSlider("rd-elev", "sunElev", (v) => Math.round(v) + "°");
+    bindSlider("rd-azim", "sunAzim", (v) => Math.round(v) + "°");
+    bindSlider("rd-sun", "sunStrength", (v) => v.toFixed(2));
+    bindSlider("rd-exposure", "exposure", (v) => v.toFixed(2));
+    bindSlider("rd-aperture", "aperture", (v) => v ? v.toFixed(3) : "off");
+    bindSlider("rd-focus", "focus", (v) => v.toFixed(1));
+    bindToggle("rd-alpha", "bgTransparent");
+    bindToggle("rd-ground", "ground");
+    const skyColor = p.querySelector("#rd-skycolor");
+    if (skyColor) skyColor.addEventListener("input", () => set("skyColor", skyColor.value));
+
+    p.querySelector("#rd-pause").addEventListener("click", () => BT.Render.togglePause());
+    p.querySelector("#rd-save").addEventListener("click", () => BT.Render.savePNG());
+    BT.Render._syncPauseBtn();
+    BT.Render._updateProgress();
   },
 
   _renderVertexPanel(p) {
@@ -644,8 +843,11 @@ BT.UI = {
     p.querySelector("#finish-chips").addEventListener("click", (ev) => {
       const b = ev.target.closest(".chip");
       if (!b) return;
+      const fin = BT.Mesh.FINISHES[b.dataset.f];
       const beforeProps = { color: sel.color, finish: sel.finish, flat: sel.flat };
-      const afterProps = { color: sel.color, finish: b.dataset.f, flat: sel.flat };
+      // finishes with a signature color (wood, gold, ...) set it on pick;
+      // the color picker still works afterwards
+      const afterProps = { color: fin.tint || sel.color, finish: b.dataset.f, flat: sel.flat };
       BT.Mesh.applyMaterialProps(sel, afterProps);
       BT.History.push({ type: "material", id: sel.id, before: beforeProps, after: afterProps });
     });
@@ -807,6 +1009,22 @@ BT.UI = {
     if (v) v.textContent = BT.Sculpt.settings.radius.toFixed(2);
   },
 
+  // update material controls in place: rebuilding the panel on every color
+  // "input" event would yank the native color picker shut mid-drag
+  _syncMaterialUI() {
+    const sel = BT.state.selected;
+    if (BT.state.mode !== "object" || !sel) return;
+    const p = this._els.panel;
+    const colorEl = p.querySelector("#obj-color");
+    if (!colorEl) return; // a different panel (deform session) is showing
+    if (colorEl !== document.activeElement) colorEl.value = sel.color;
+    const chips = p.querySelector("#finish-chips");
+    if (chips) chips.querySelectorAll(".chip").forEach((c) =>
+      c.setAttribute("aria-pressed", String(c.dataset.f === sel.finish)));
+    const flat = p.querySelector("#flat-toggle");
+    if (flat) flat.setAttribute("aria-pressed", String(!sel.flat));
+  },
+
   _snapshotTransform(obj) {
     return { p: obj.mesh.position.toArray(), q: obj.mesh.quaternion.toArray(), s: obj.mesh.scale.toArray() };
   },
@@ -911,6 +1129,7 @@ BT.UI = {
         case "2": BT.setMode("sculpt"); break;
         case "3": BT.setMode("paint"); break;
         case "4": BT.setMode("vertex"); break;
+        case "5": BT.setMode("render"); break;
         case "arrowup": if (BT.state.mode === "vertex") { e.preventDefault(); BT.Vertex.step(0, 1); } break;
         case "arrowdown": if (BT.state.mode === "vertex") { e.preventDefault(); BT.Vertex.step(0, -1); } break;
         case "arrowleft": if (BT.state.mode === "vertex") { e.preventDefault(); BT.Vertex.step(-1, 0); } break;
@@ -936,7 +1155,7 @@ BT.UI = {
         case "[": BT.Sculpt.nudgeRadius(1 / 1.15); break;
         case "]": BT.Sculpt.nudgeRadius(1.15); break;
         case "escape":
-          if (BT.Render._running) BT.Render.close();
+          if (BT.state.mode === "render") BT.setMode("object");
           else if (BT.state.gizmoMode === "cut") BT.Gizmo.setMode("select");
           else if (BT.Deform.session) BT.Deform.cancel();
           else if (BT.state.mode !== "object") BT.setMode("object");

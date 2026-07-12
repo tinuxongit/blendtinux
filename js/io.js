@@ -90,7 +90,7 @@ BT.IO = {
       const indices = addAccessor(idx, idx instanceof Uint16Array ? 5123 : 5125, "SCALAR", 34963, false);
 
       const fin = BT.Mesh.FINISHES[obj.finish];
-      const c = colAttr ? new THREE.Color(1, 1, 1) : new THREE.Color(fin.tint || obj.color).convertSRGBToLinear();
+      const c = colAttr ? new THREE.Color(1, 1, 1) : new THREE.Color(obj.color).convertSRGBToLinear();
       const mat = {
         name: obj.name + " material",
         pbrMetallicRoughness: {
@@ -139,9 +139,9 @@ BT.IO = {
 
   // ---- OBJ -------------------------------------------------------------------
 
-  exportOBJ() {
+  buildOBJText() {
     const objects = BT.state.objects;
-    if (!objects.length) { BT.emit("toast", "nothing to export yet"); return; }
+    if (!objects.length) return null;
     const out = ["# made with BlendTinux, tinux.dev/blendtinux"];
     let offset = 1;
     for (const obj of objects) {
@@ -166,7 +166,13 @@ BT.IO = {
       }
       offset += b.count;
     }
-    this.download(new Blob([out.join("\n")], { type: "text/plain" }), "blendtinux.obj");
+    return out.join("\n");
+  },
+
+  exportOBJ() {
+    const text = this.buildOBJText();
+    if (text === null) { BT.emit("toast", "nothing to export yet"); return; }
+    this.download(new Blob([text], { type: "text/plain" }), "blendtinux.obj");
   },
 
   // ---- STL (binary) ------------------------------------------------------------
@@ -276,7 +282,7 @@ BT.IO = {
         if (vs.length === 4) quadPairs.push(base); // the two fan triangles form a quad
       }
     }
-    if (!rawPos.length || !faces.length) { BT.emit("toast", "could not read that .obj file"); return; }
+    if (!rawPos.length || !faces.length) { BT.emit("toast", "could not read that .obj file"); return null; }
 
     let col = null;
     if (hasColor) {
@@ -286,7 +292,7 @@ BT.IO = {
     const quad = new Int32Array(faces.length / 3).fill(-1);
     for (const base of quadPairs) { quad[base] = base + 1; quad[base + 1] = base; }
     const data = BT.Mesh.weldData(new Float32Array(rawPos), new Uint32Array(faces), col, quad);
-    if (!data.idx.length) { BT.emit("toast", "could not read that .obj file"); return; }
+    if (!data.idx.length) { BT.emit("toast", "could not read that .obj file"); return null; }
 
     const name = (filename || "import").replace(/\.obj$/i, "").slice(0, 40) || "import";
     const obj = BT.Mesh.createObject({ data, name });
@@ -309,11 +315,20 @@ BT.IO = {
     BT.History.push({ type: "add", data: BT.Mesh.serializeObject(obj) });
     BT.Viewport.frameObject(obj);
     BT.emit("toast", "imported " + name + " (" + BT.Mesh.vertCount(obj).toLocaleString() + " verts)");
+    return obj;
   },
 
   // ---- autosave -------------------------------------------------------------------
 
-  KEY: "blendtinux.scene.v1",
+  /* Projects: every project is one localStorage key with the full scene
+     payload; a small index key remembers the list and which one is open.
+     The pre-project single-scene autosave migrates into the first project. */
+
+  KEY_INDEX: "blendtinux.projects.v1",
+  KEY_PREFIX: "blendtinux.proj.",
+  KEY_LEGACY: "blendtinux.scene.v1",
+  _projects: [],   // [{id, name}]
+  _currentId: null,
   _saveTimer: 0,
   _warned: false,
 
@@ -323,12 +338,14 @@ BT.IO = {
   },
 
   save() {
+    if (!this._currentId) return;
     const s = BT.state;
     const cam = BT.Viewport.cam;
     const payload = {
       v: 1,
       cam: { t: cam.target.toArray(), theta: cam.theta, phi: cam.phi, dist: cam.dist },
-      mode: s.mode,
+      mode: s.mode === "render" ? "object" : s.mode, // never boot into a live tracer
+      render: BT.Render.settings,
       sel: s.selected ? s.selected.id : null,
       objects: s.objects.map((obj) => {
         const d = BT.Mesh.serializeObject(obj);
@@ -345,7 +362,7 @@ BT.IO = {
     try {
       const str = JSON.stringify(payload);
       if (str.length > 4.6e6) throw new Error("too large");
-      localStorage.setItem(this.KEY, str);
+      localStorage.setItem(this.KEY_PREFIX + this._currentId, str);
       BT.emit("saved");
     } catch (err) {
       if (!this._warned) {
@@ -355,12 +372,47 @@ BT.IO = {
     }
   },
 
+  // boot: pick up the project list and open the last project
   restore() {
-    let payload = null;
+    this._loadIndex();
+    if (!this._projects.length) {
+      const legacy = localStorage.getItem(this.KEY_LEGACY);
+      const id = BT.uid();
+      this._projects = [{ id, name: "untitled" }];
+      this._currentId = id;
+      if (legacy) {
+        try {
+          localStorage.setItem(this.KEY_PREFIX + id, legacy);
+          localStorage.removeItem(this.KEY_LEGACY);
+        } catch (_) {}
+      }
+      this._saveIndex();
+    }
+    if (!this._projects.some((p) => p.id === this._currentId)) this._currentId = this._projects[0].id;
+    return this._loadPayload(this._currentId);
+  },
+
+  _loadIndex() {
     try {
-      const str = localStorage.getItem(this.KEY);
+      const idx = JSON.parse(localStorage.getItem(this.KEY_INDEX));
+      if (idx && Array.isArray(idx.list) && idx.list.length) {
+        this._projects = idx.list;
+        this._currentId = idx.current;
+      }
+    } catch (_) {}
+  },
+
+  _saveIndex() {
+    try {
+      localStorage.setItem(this.KEY_INDEX, JSON.stringify({ current: this._currentId, list: this._projects }));
+    } catch (_) {}
+  },
+
+  _loadPayload(id) {
+    try {
+      const str = localStorage.getItem(this.KEY_PREFIX + id);
       if (!str) return false;
-      payload = JSON.parse(str);
+      const payload = JSON.parse(str);
       if (!payload || payload.v !== 1 || !payload.objects.length) return false;
       for (const d of payload.objects) {
         const obj = BT.Mesh.deserializeObject({
@@ -376,12 +428,88 @@ BT.IO = {
       const cam = BT.Viewport.cam;
       cam.target.fromArray(payload.cam.t);
       cam.theta = payload.cam.theta; cam.phi = payload.cam.phi; cam.dist = payload.cam.dist;
+      Object.assign(BT.Render.settings, BT.Render.DEFAULTS, payload.render || {});
       if (payload.sel) BT.select(BT.findObject(payload.sel));
       if (payload.mode && payload.mode !== "object") BT.setMode(payload.mode);
       return true;
     } catch (err) {
-      try { localStorage.removeItem(this.KEY); } catch (_) {}
+      try { localStorage.removeItem(this.KEY_PREFIX + id); } catch (_) {}
       return false;
     }
+  },
+
+  // ---- project ops (the topbar project menu drives these) ---------------------
+
+  currentProject() {
+    return this._projects.find((p) => p.id === this._currentId) || null;
+  },
+
+  listProjects() { return this._projects; },
+
+  starterScene() {
+    const cam = BT.Viewport.cam;
+    cam.target.set(0, 0.4, 0); cam.theta = 0.6; cam.phi = 1.15; cam.dist = 4.2;
+    const data = BT.Mesh.createPrimitive("sphere");
+    const obj = BT.Mesh.createObject({ data, name: "sphere" });
+    obj.mesh.position.y = 0.6;
+    BT.addObject(obj, true);
+  },
+
+  _clearScene() {
+    if (BT.state.mode !== "object") BT.setMode("object");
+    BT.select(null);
+    for (const obj of BT.state.objects.slice()) {
+      BT.removeObject(obj);
+      BT.Mesh.disposeObject(obj);
+    }
+    BT.History.clear();
+  },
+
+  switchProject(id) {
+    if (id === this._currentId || !this._projects.some((p) => p.id === id)) return;
+    this.save(); // keep the scene we are leaving
+    this._currentId = id;
+    this._saveIndex();
+    this._clearScene();
+    if (!this._loadPayload(id)) this.starterScene();
+    BT.emit("project");
+  },
+
+  newProject() {
+    this.save();
+    const id = BT.uid();
+    let n = 0, name;
+    do { n++; name = n === 1 ? "untitled" : "untitled " + n; } while (this._projects.some((p) => p.name === name));
+    this._projects.push({ id, name });
+    this._currentId = id;
+    this._saveIndex();
+    this._clearScene();
+    Object.assign(BT.Render.settings, BT.Render.DEFAULTS);
+    this.starterScene();
+    this.save();
+    BT.emit("project");
+  },
+
+  renameProject(id, name) {
+    const p = this._projects.find((x) => x.id === id);
+    name = (name || "").trim().slice(0, 40);
+    if (!p || !name || p.name === name) return;
+    p.name = name;
+    this._saveIndex();
+    BT.emit("project");
+  },
+
+  deleteProject(id) {
+    const i = this._projects.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    try { localStorage.removeItem(this.KEY_PREFIX + id); } catch (_) {}
+    this._projects.splice(i, 1);
+    if (id !== this._currentId) { this._saveIndex(); BT.emit("project"); return; }
+    if (!this._projects.length) { this._currentId = null; this.newProject(); return; }
+    this._currentId = this._projects[Math.min(i, this._projects.length - 1)].id;
+    this._saveIndex();
+    this._clearScene();
+    if (!this._loadPayload(this._currentId)) this.starterScene();
+    BT.emit("project");
   },
 };

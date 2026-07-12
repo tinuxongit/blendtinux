@@ -6,7 +6,7 @@ const BT = {
   state: {
     objects: [],       // SceneObject records, see mesh.js createObject
     selected: null,
-    mode: "object",      // object | sculpt | paint | vertex
+    mode: "object",      // object | sculpt | paint | vertex | render
     gizmoMode: "select", // select | hand | translate | rotate | scale | cut
   },
 
@@ -59,7 +59,7 @@ const BT = {
   },
   setMode(mode) {
     if (this.state.mode === mode) return;
-    if (mode !== "object" && !this.state.selected) {
+    if (mode !== "object" && mode !== "render" && !this.state.selected) {
       if (this.state.objects.length === 1) this.select(this.state.objects[0]);
       else { this.emit("toast", "select an object first"); return; }
     }
