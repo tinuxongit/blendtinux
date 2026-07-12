@@ -1,10 +1,22 @@
 # BlendTinux MCP
 
-Let an AI assistant (Claude Code, Claude Desktop, or any MCP host) build and edit BlendTinux scenes: add and arrange objects, set materials, take screenshots, run ray-traced renders, manage projects, and import/export OBJ.
+Let an AI assistant (Claude Code, Claude Desktop, claude.ai, or any MCP host) build and edit BlendTinux scenes: add and arrange objects, set materials, take screenshots, run ray-traced renders, manage projects, and import/export OBJ.
 
-Everything runs on **your machine**. Your MCP host launches this small server locally, the server opens a WebSocket on `127.0.0.1`, and your open BlendTinux tab (tinux.dev/blendtinux or a local copy) connects to it when you click the plug button in the top bar. Nothing goes through the website and nobody else can reach your scene.
+## Zero-install way (recommended)
 
-## Setup
+No downloads, no Node, nothing to run:
+
+1. Open tinux.dev/blendtinux and click the **plug icon** in the top bar. When it links through the relay, a short pairing code appears next to it.
+2. Click the code to copy your personal MCP address (it looks like `https://blendtinux-mcp.....workers.dev/YOURCODE`).
+3. Add it to Claude Code: `claude mcp add --transport http blendtinux <that address>`, or paste the address into claude.ai / Claude Desktop as a custom connector.
+
+The relay (a Cloudflare Worker, source in `../mcp-worker/`) only routes each pairing code to the one browser tab holding it, so nobody can reach your scene without your code. The code is remembered by your browser, so the address stays valid across sessions.
+
+## Local way (fully offline)
+
+A small server your MCP host launches on your own machine: it opens a WebSocket on `127.0.0.1` and your BlendTinux tab connects to it. The plug button always tries this local server first, before the relay.
+
+### Setup
 
 Requirements: Node 18+ and pnpm.
 

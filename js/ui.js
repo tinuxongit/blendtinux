@@ -150,16 +150,31 @@ BT.UI = {
     });
 
     const mcp = document.getElementById("mcp-btn");
+    const mcpCode = document.getElementById("mcp-code");
     mcp.innerHTML = this.ic("plug");
     mcp.addEventListener("click", () => BT.MCP.toggle());
+    mcpCode.addEventListener("click", () => {
+      const url = BT.MCP.url();
+      const done = () => this.toast("MCP address copied: " + url);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(done, () => this.toast(url));
+      } else this.toast(url);
+    });
     const syncMcp = () => {
       mcp.setAttribute("aria-pressed", String(BT.MCP.connected));
       mcp.classList.toggle("waiting", BT.MCP.enabled && !BT.MCP.connected);
       mcp.dataset.tip = BT.MCP.connected
-        ? "MCP connected, click to turn it off"
+        ? (BT.MCP.via === "relay"
+          ? "MCP linked through the relay, click to turn it off"
+          : "MCP connected to the local server, click to turn it off")
         : BT.MCP.enabled
-          ? "MCP is on, waiting for the local server (see mcp/README.md)"
-          : "Let an AI assistant control BlendTinux over MCP (runs on your machine only)";
+          ? "MCP is on, connecting..."
+          : "Let an AI assistant control BlendTinux over MCP";
+      mcpCode.hidden = !(BT.MCP.connected && BT.MCP.via === "relay");
+      if (!mcpCode.hidden) {
+        mcpCode.textContent = BT.MCP.code;
+        mcpCode.dataset.tip = "your pairing code, click to copy your MCP address, then: claude mcp add --transport http blendtinux <paste>";
+      }
     };
     BT.on("mcp", syncMcp);
     syncMcp();
