@@ -164,7 +164,7 @@ BT.MCP = {
   _summary(o) {
     const e = new THREE.Euler().setFromQuaternion(o.mesh.quaternion, "XYZ");
     const deg = (r) => Math.round(r * 180 / Math.PI * 100) / 100;
-    return {
+    const out = {
       id: o.id, name: o.name, verts: BT.Mesh.vertCount(o),
       position: o.mesh.position.toArray(),
       rotation: [deg(e.x), deg(e.y), deg(e.z)],
@@ -172,6 +172,16 @@ BT.MCP = {
       color: o.color, finish: o.finish, flat: o.flat,
       visible: o.mesh.visible !== false,
     };
+    if (o.rough != null) out.roughness = o.rough;
+    if (o.metal != null) out.metalness = o.metal;
+    if (o.emit != null) out.emissive = o.emit;
+    return out;
+  },
+
+  // material override from a tool arg: undefined keeps, negative clears
+  _matArg(v, max) {
+    if (v === undefined) return undefined;
+    return v < 0 ? null : BT.clamp(v, 0, max);
   },
 
   _snapshot(o) {
@@ -207,6 +217,7 @@ BT.MCP = {
       return {
         project: cur ? cur.name : null,
         mode: BT.state.mode,
+        camera: BT.Viewport.cameraInfo(),
         selected: BT.state.selected ? BT.state.selected.id : null,
         objects: BT.state.objects.map((o) => this._summary(o)),
       };
@@ -221,6 +232,9 @@ BT.MCP = {
         data, flat,
         name: args.name || (n > 1 ? args.kind + " " + n : args.kind),
         color: args.color, finish: args.finish,
+        rough: this._matArg(args.roughness, 1),
+        metal: this._matArg(args.metalness, 1),
+        emit: this._matArg(args.emissive, 5),
       });
       // default placement: sit on the grid, step aside if the spot is taken
       obj.mesh.geometry.computeBoundingBox();
@@ -243,12 +257,23 @@ BT.MCP = {
         BT.History.push({ type: "transform", id: obj.id, before, after: this._snapshot(obj) });
         BT.emit("transform", obj);
       }
-      if (args.color !== undefined || args.finish !== undefined || args.flat !== undefined) {
-        const before = { color: obj.color, finish: obj.finish, flat: obj.flat };
+      if (args.color !== undefined || args.finish !== undefined || args.flat !== undefined ||
+          args.roughness !== undefined || args.metalness !== undefined || args.emissive !== undefined) {
+        const before = { color: obj.color, finish: obj.finish, flat: obj.flat, rough: obj.rough, metal: obj.metal, emit: obj.emit };
+        // switching finish resets overrides to the new preset unless the same
+        // call sets them again; a negative value clears one explicitly
+        const finishChanged = args.finish !== undefined && BT.Mesh.normalizeFinish(args.finish) !== obj.finish;
+        const ov = (argV, curV, max) => {
+          const v = this._matArg(argV, max);
+          return v !== undefined ? v : (finishChanged ? null : curV);
+        };
         const after = {
           color: args.color !== undefined ? args.color : obj.color,
           finish: args.finish !== undefined ? args.finish : obj.finish,
           flat: args.flat !== undefined ? args.flat : obj.flat,
+          rough: ov(args.roughness, obj.rough, 1),
+          metal: ov(args.metalness, obj.metal, 1),
+          emit: ov(args.emissive, obj.emit, 5),
         };
         BT.Mesh.applyMaterialProps(obj, after);
         BT.History.push({ type: "material", id: obj.id, before, after });
@@ -308,7 +333,7 @@ BT.MCP = {
 
     screenshot() {
       let src;
-      if (BT.state.mode === "render" && BT.Render._renderer) {
+      if (BT.state.mode === "render" && BT.Render._running && BT.Render._renderer) {
         BT.Render._redrawView();
         src = BT.Render._renderer.domElement;
       } else {
@@ -324,13 +349,26 @@ BT.MCP = {
     async render(args) {
       const samples = BT.clamp(Math.round(args.samples || 200), 16, 2000);
       const prevMode = BT.state.mode;
-      const prevTarget = BT.Render.settings.target;
-      BT.Render.settings.target = samples;
+      const s = BT.Render.settings;
+      const prev = { target: s.target, resW: s.resW, resH: s.resH };
+      const resChanged = !!(args.width && args.height);
+      s.target = samples;
+      if (resChanged) {
+        s.resW = BT.clamp(Math.round(args.width), 64, 4096);
+        s.resH = BT.clamp(Math.round(args.height), 64, 4096);
+      }
       try {
         if (prevMode !== "render") BT.setMode("render");
-        else BT.Render.applySettings("target");
+        else if (!BT.Render._running) BT.Render.open();
+        else {
+          // start from zero so the count means what it says
+          BT.Render.applySettings("target");
+          if (resChanged) BT.Render._recreateTargets();
+          else BT.Render._resetAccum();
+        }
         await this._sleep(100); // let open() or its deferred bail settle
         if (!BT.Render._running) throw new Error("the ray tracer could not start (empty scene or no WebGL2)");
+        const size = BT.Render._size();
         const deadline = performance.now() + 110000;
         while (BT.Render._running && BT.Render._samples < samples && performance.now() < deadline) {
           await this._sleep(200);
@@ -341,12 +379,124 @@ BT.MCP = {
         return {
           png: g.png,
           note: (got >= samples ? got + " samples" : "timed out at " + got + " of " + samples + " samples") +
-            ", " + g.w + "x" + g.h,
+            ", rendered " + size.w + "x" + size.h + (g.w !== size.w ? ", returned " + g.w + "x" + g.h : ""),
         };
       } finally {
-        BT.Render.settings.target = prevTarget;
+        s.target = prev.target;
+        s.resW = prev.resW;
+        s.resH = prev.resH;
         if (BT.state.mode === "render" && prevMode !== "render") BT.setMode(prevMode);
+        else if (BT.Render._running && resChanged) BT.Render._recreateTargets();
       }
+    },
+
+    set_camera(args) {
+      BT.Viewport.setCamera(args);
+      BT.IO.scheduleSave();
+      return BT.Viewport.cameraInfo();
+    },
+
+    set_render_settings(args) {
+      const s = BT.Render.settings;
+      const ops = [
+        ["sunElevation", "sunElev", (v) => BT.clamp(v, 0, 90)],
+        ["sunAzimuth", "sunAzim", (v) => ((v % 360) + 360) % 360],
+        ["sunStrength", "sunStrength", (v) => BT.clamp(v, 0, 5)],
+        ["sky", "sky", (v) => v],
+        ["skyColor", "skyColor", (v) => v],
+        ["exposure", "exposure", (v) => BT.clamp(v, 0.1, 5)],
+        ["bounces", "bounces", (v) => BT.clamp(Math.round(v), 2, 10)],
+        ["ground", "ground", (v) => !!v],
+        ["transparentBackground", "bgTransparent", (v) => !!v],
+        ["aperture", "aperture", (v) => BT.clamp(v, 0, 0.5)],
+        ["focusDistance", "focus", (v) => BT.clamp(v, 0, 50)],
+      ];
+      for (const [argKey, key, cook] of ops) {
+        if (args[argKey] === undefined) continue;
+        s[key] = cook(args[argKey]);
+        BT.Render.applySettings(key);
+      }
+      BT.IO.scheduleSave();
+      return {
+        sunElevation: s.sunElev, sunAzimuth: s.sunAzim, sunStrength: s.sunStrength,
+        sky: s.sky, skyColor: s.skyColor, exposure: s.exposure, bounces: s.bounces,
+        ground: s.ground, transparentBackground: s.bgTransparent,
+        aperture: s.aperture, focusDistance: s.focus,
+      };
+    },
+
+    create_mesh(args) {
+      const pos = args.positions, faces = args.faces;
+      if (!Array.isArray(pos) || pos.length < 9 || pos.length % 3) throw new Error("positions must be a flat [x,y,z, x,y,z, ...] list");
+      const nV = pos.length / 3;
+      if (nV > 100000) throw new Error("too many vertices (100k max)");
+      if (!Array.isArray(faces) || !faces.length) throw new Error("faces must be a list of 3- or 4-index polygons");
+      for (const f of faces) {
+        if (!Array.isArray(f) || f.length < 3 || f.length > 4) throw new Error("each face needs 3 or 4 vertex indices");
+        for (const v of f) if (!Number.isInteger(v) || v < 0 || v >= nV) throw new Error("face index " + v + " is out of range (" + nV + " vertices)");
+      }
+      const data = BT.Mesh.createMeshData(pos, faces);
+      const obj = BT.Mesh.createObject({
+        data,
+        name: (args.name || "mesh").slice(0, 40),
+        color: args.color, finish: args.finish, flat: !!args.flat,
+        rough: this._matArg(args.roughness, 1),
+        metal: this._matArg(args.metalness, 1),
+        emit: this._matArg(args.emissive, 5),
+      });
+      this._applyTransformArgs(obj, args);
+      BT.addObject(obj, true);
+      BT.History.push({ type: "add", data: BT.Mesh.serializeObject(obj) });
+      return this._summary(obj);
+    },
+
+    transform_objects(args) {
+      const ids = args.ids || [];
+      if (!ids.length) throw new Error("pass ids: an array of object ids from list_scene");
+      const objs = ids.map((id) => {
+        const o = BT.findObject(id);
+        if (!o) throw new Error("no object with id " + id + ", call list_scene for current ids");
+        return o;
+      });
+      const box = new THREE.Box3();
+      for (const o of objs) { o.mesh.updateMatrixWorld(); box.expandByObject(o.mesh); }
+      const pivot = args.pivot
+        ? new THREE.Vector3().fromArray(args.pivot)
+        : new THREE.Vector3((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+      const t = new THREE.Vector3().fromArray(args.translate || [0, 0, 0]);
+      let q = null;
+      if (args.rotate) {
+        const r = args.rotate.map((d) => d * Math.PI / 180);
+        q = new THREE.Quaternion().setFromEuler(new THREE.Euler(r[0], r[1], r[2], "XYZ"));
+      }
+      const k = args.scale != null ? args.scale : 1;
+      if (!(k > 0)) throw new Error("scale must be > 0");
+      const cmds = [];
+      for (const o of objs) {
+        const before = this._snapshot(o);
+        const p = o.mesh.position.clone().sub(pivot);
+        if (q) p.applyQuaternion(q);
+        p.multiplyScalar(k).add(pivot).add(t);
+        o.mesh.position.copy(p);
+        if (q) o.mesh.quaternion.premultiply(q);
+        o.mesh.scale.multiplyScalar(k);
+        cmds.push({ type: "transform", id: o.id, before, after: this._snapshot(o) });
+        BT.emit("transform", o);
+      }
+      BT.History.push(cmds.length === 1 ? cmds[0] : { type: "batch", cmds });
+      return objs.map((o) => this._summary(o));
+    },
+
+    deform_object(args) {
+      const obj = this._resolve(args);
+      const kinds = BT.Deform.KINDS;
+      if (!kinds[args.kind]) throw new Error("kind must be twist, bend, taper or noise");
+      const axis = { x: 0, y: 1, z: 2 }[args.axis || "y"];
+      if (axis === undefined) throw new Error("axis must be x, y or z");
+      const amount = BT.clamp(args.amount, kinds[args.kind].min, kinds[args.kind].max);
+      const freq = BT.clamp(args.detail || 2.5, 0.5, 8);
+      BT.Deform.applyTo(obj, args.kind, axis, amount, freq);
+      return this._summary(obj);
     },
 
     list_projects() {
@@ -380,9 +530,10 @@ BT.MCP = {
     },
 
     import_obj(args) {
-      const obj = BT.IO.importOBJText(args.text, args.name || "import.obj");
-      if (!obj) throw new Error("could not read that OBJ text");
-      return this._summary(obj);
+      const list = BT.IO.importOBJText(args.text, args.name || "import.obj", { fit: args.fit, split: args.split });
+      if (!list || !list.length) throw new Error("could not read that OBJ text");
+      if (list.length === 1) return this._summary(list[0]);
+      return { imported: list.map((o) => this._summary(o)) };
     },
   },
 };

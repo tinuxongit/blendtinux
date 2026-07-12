@@ -92,6 +92,38 @@ BT.Viewport = {
     this.cam.dist = BT.clamp(r * 2.6, 0.5, 200);
   },
 
+  /* Programmatic camera moves (the MCP set_camera tool). position/target are
+     world-space; position is folded back into the orbit parameters so the
+     user can keep orbiting from wherever the camera lands. */
+  setCamera(a) {
+    const c = this.cam;
+    if (a.target) c.target.fromArray(a.target);
+    if (a.position) {
+      const p = new THREE.Vector3().fromArray(a.position).sub(c.target);
+      const d = Math.max(p.length(), 0.05);
+      c.dist = BT.clamp(d, 0.2, 200);
+      c.phi = BT.clamp(Math.acos(BT.clamp(p.y / d, -1, 1)), 0.05, Math.PI - 0.05);
+      c.theta = Math.atan2(p.x, p.z);
+    }
+    if (a.distance != null) c.dist = BT.clamp(a.distance, 0.2, 200);
+    if (a.fov != null) {
+      this.camera.fov = BT.clamp(a.fov, 10, 120);
+      this.camera.updateProjectionMatrix();
+    }
+    this._applyCamera();
+  },
+
+  cameraInfo() {
+    this._applyCamera();
+    const r3 = (v) => Math.round(v * 1000) / 1000;
+    return {
+      position: this.camera.position.toArray().map(r3),
+      target: this.cam.target.toArray().map(r3),
+      distance: r3(this.cam.dist),
+      fov: this.camera.fov,
+    };
+  },
+
   // ---- picking -------------------------------------------------------------
 
   rayFromClient(cx, cy) {

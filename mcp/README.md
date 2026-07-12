@@ -68,9 +68,11 @@ Open BlendTinux in your browser and click the **plug icon** in the top bar. It g
 ## Tools
 
 - `list_scene`, `add_object`, `update_object`, `duplicate_object`, `delete_object`, `select_object`, `subdivide_object` (every change is one Ctrl+Z step in the app)
-- `screenshot` (what you see), `render` (path-traced image at N samples)
+- `create_mesh` (raw vertices and faces), `deform_object` (twist/bend/taper/noise), `transform_objects` (move several objects as one rigid group)
+- `set_camera` (position/target/fov), `set_render_settings` (sun, sky, exposure, bounces, depth of field; an `emissive` material override turns any object into an area light)
+- `screenshot` (what you see), `render` (path-traced image at exactly N samples, optional width/height)
 - `list_projects`, `create_project`, `open_project`, `rename_project`
-- `export_obj`, `import_obj`
+- `export_obj`, `import_obj` (splits `o`/`g` groups into separate objects; `fit: false` keeps exact coordinates)
 
 ## Port
 

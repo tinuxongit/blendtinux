@@ -36,6 +36,7 @@ BT.Render = {
     target: 1000,      // stop refining at this many samples, 0 = keep going
     bounces: 5,
     resScale: 1,       // 0.5 | 1 | 2 of the window size
+    resW: 0, resH: 0,  // explicit render size in pixels, 0 = follow the window
     sunElev: 54, sunAzim: 56, sunStrength: 1, // ~ the old sun at (3,5,2)
     sky: "day",        // day | sunset | night | solid
     skyColor: "#0e1220",
@@ -178,6 +179,12 @@ BT.Render = {
 
   _size() {
     const s = this.settings;
+    if (s.resW && s.resH) {
+      return {
+        w: Math.min(4096, Math.max(64, Math.round(s.resW))),
+        h: Math.min(4096, Math.max(64, Math.round(s.resH))),
+      };
+    }
     const cw = this._canvas && this._canvas.clientWidth || window.innerWidth;
     const ch = this._canvas && this._canvas.clientHeight || window.innerHeight;
     return {
@@ -188,12 +195,15 @@ BT.Render = {
 
   // ---- the per-frame loop ---------------------------------------------------------
 
+  _sig() {
+    const c = BT.Viewport.cam;
+    return c.theta + "," + c.phi + "," + c.dist + "," + c.target.x + "," + c.target.y + "," + c.target.z + "," + BT.Viewport.camera.fov;
+  },
+
   _step() {
     // the viewport loop is paused, so track its orbit state ourselves:
     // any camera change restarts the accumulation (the BVH stays)
-    const c = BT.Viewport.cam;
-    const sig = c.theta + "," + c.phi + "," + c.dist + "," + c.target.x + "," + c.target.y + "," + c.target.z;
-    if (sig !== this._camSig) {
+    if (this._sig() !== this._camSig) {
       this._updateCamera();
       this._resetAccum();
     }
@@ -227,9 +237,9 @@ BT.Render = {
     u.uCamRight.value.set(e[0], e[1], e[2]);
     u.uCamUp.value.set(e[4], e[5], e[6]);
     u.uCamFwd.value.set(-e[8], -e[9], -e[10]);
+    u.uTanFov.value = Math.tan(vp.camera.fov * 0.5 * Math.PI / 180);
     u.uFocusDist.value = this.settings.focus > 0 ? this.settings.focus : vp.cam.dist;
-    const c = vp.cam;
-    this._camSig = c.theta + "," + c.phi + "," + c.dist + "," + c.target.x + "," + c.target.y + "," + c.target.z;
+    this._camSig = this._sig();
   },
 
   _resetAccum() {
@@ -374,12 +384,12 @@ BT.Render = {
       const nor = g.getAttribute("normal").array;
       const colAttr = g.getAttribute("color");
       const idx = g.index.array;
-      const fin = BT.Mesh.FINISHES[obj.finish];
+      const em = BT.Mesh.effectiveMat(obj.finish, obj.rough, obj.metal, obj.emit);
       const base = new THREE.Color(obj.color).convertSRGBToLinear();
-      const kind = fin.kind, rough = fin.roughness;
-      const metal = fin.metalness || 0, dens = fin.density || 0;
-      const pat = fin.pattern || 0;
-      const emis = fin.emissive ? fin.emissive * 2.4 : 0;
+      const kind = em.kind, rough = em.roughness;
+      const metal = em.metalness || 0, dens = em.density || 0;
+      const pat = em.pattern || 0;
+      const emis = em.emissive ? em.emissive * 2.4 : 0;
       for (let f = 0; f < idx.length; f += 3) {
         const t = { p: [], n: [], c: [], kind, rough, emis, metal, dens, pat, flat: obj.flat ? 1 : 0 };
         for (let k = 0; k < 3; k++) {

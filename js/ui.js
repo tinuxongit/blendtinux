@@ -519,6 +519,7 @@ BT.UI = {
     this._pasteCount++;
     const d = {
       id: BT.uid(), name: c.name + " copy", color: c.color, finish: c.finish, flat: c.flat, vis: c.vis,
+      rough: c.rough, metal: c.metal, emit: c.emit,
       p: [c.p[0] + 0.6 * this._pasteCount, c.p[1], c.p[2] + 0.6 * this._pasteCount],
       q: c.q.slice(), s: c.s.slice(),
       pos: c.pos.slice(), idx: c.idx.slice(), col: c.col ? c.col.slice() : null,
@@ -843,6 +844,12 @@ BT.UI = {
       '<input data-t="' + id + '" data-i="2" value="' + f(c) + '" aria-label="' + id + ' z">' +
       "</div>";
 
+    const em = BT.Mesh.effectiveMat(sel.finish, sel.rough, sel.metal, sel.emit);
+    const matSlider = (id, label, max, step, val, fmt, tip) =>
+      '<div class="slider-row"><label data-tip="' + tip + '">' + label + "</label>" +
+      '<input type="range" id="' + id + '" min="0" max="' + max + '" step="' + step + '" value="' + val + '">' +
+      '<span class="sval" id="' + id + '-val">' + fmt(val) + "</span></div>";
+
     p.innerHTML =
       '<div class="psec"><input type="text" id="obj-name" value="' + this._esc(sel.name) + '" aria-label="Object name"></div>' +
       '<div class="psec"><div class="plabel">Transform</div>' +
@@ -855,6 +862,9 @@ BT.UI = {
       '<div class="prow"><label>finish</label><div class="chips" id="finish-chips">' +
       this.FINISH_LABELS.map(([k, label]) => '<button class="chip" data-f="' + k + '" aria-pressed="' + (sel.finish === k) + '">' + label + "</button>").join("") +
       "</div></div>" +
+      matSlider("mat-rough", "roughness", 1, 0.01, em.roughness, (v) => v.toFixed(2), "0 mirror-smooth, 1 fully diffuse; picking a finish resets it") +
+      matSlider("mat-metal", "metalness", 1, 0.01, em.metalness, (v) => v.toFixed(2), "how metallic the surface reflects; picking a finish resets it") +
+      matSlider("mat-emit", "glow", 3, 0.05, em.emissive, (v) => v ? v.toFixed(2) : "off", "makes the shape emit light; renders treat it as a real light source") +
       '<div class="trow"><span>smooth shading</span><button class="toggle" id="flat-toggle" aria-pressed="' + (!sel.flat) + '" aria-label="smooth shading"></button></div></div>' +
       '<div class="psec"><div class="plabel">Mesh</div><div class="agrid">' +
       '<button class="abtn" id="act-dup" data-tip="Shift+D">' + this.ic("duplicate") + "Duplicate</button>" +
@@ -904,9 +914,10 @@ BT.UI = {
     });
 
     // material
+    const matProps = () => ({ color: sel.color, finish: sel.finish, flat: sel.flat, rough: sel.rough, metal: sel.metal, emit: sel.emit });
     p.querySelector("#obj-color").addEventListener("input", (ev) => {
-      const beforeProps = { color: sel.color, finish: sel.finish, flat: sel.flat };
-      const afterProps = { color: ev.target.value, finish: sel.finish, flat: sel.flat };
+      const beforeProps = matProps();
+      const afterProps = Object.assign(matProps(), { color: ev.target.value });
       BT.Mesh.applyMaterialProps(sel, afterProps);
       this._coalesceMaterialCmd(sel, beforeProps, afterProps);
     });
@@ -914,16 +925,32 @@ BT.UI = {
       const b = ev.target.closest(".chip");
       if (!b) return;
       const fin = BT.Mesh.FINISHES[b.dataset.f];
-      const beforeProps = { color: sel.color, finish: sel.finish, flat: sel.flat };
+      const beforeProps = matProps();
       // finishes with a signature color (wood, gold, ...) set it on pick;
-      // the color picker still works afterwards
-      const afterProps = { color: fin.tint || sel.color, finish: b.dataset.f, flat: sel.flat };
+      // the color picker still works afterwards. Overrides reset to the preset.
+      const afterProps = { color: fin.tint || sel.color, finish: b.dataset.f, flat: sel.flat, rough: null, metal: null, emit: null };
       BT.Mesh.applyMaterialProps(sel, afterProps);
       BT.History.push({ type: "material", id: sel.id, before: beforeProps, after: afterProps });
     });
+    const bindMatSlider = (id, key, fmt) => {
+      const inp = p.querySelector("#" + id);
+      const out = p.querySelector("#" + id + "-val");
+      inp.addEventListener("input", () => {
+        const v = parseFloat(inp.value);
+        out.textContent = fmt(v);
+        const beforeProps = matProps();
+        const afterProps = matProps();
+        afterProps[key] = v;
+        BT.Mesh.applyMaterialProps(sel, afterProps);
+        this._coalesceMaterialCmd(sel, beforeProps, afterProps);
+      });
+    };
+    bindMatSlider("mat-rough", "rough", (v) => v.toFixed(2));
+    bindMatSlider("mat-metal", "metal", (v) => v.toFixed(2));
+    bindMatSlider("mat-emit", "emit", (v) => v ? v.toFixed(2) : "off");
     p.querySelector("#flat-toggle").addEventListener("click", () => {
-      const beforeProps = { color: sel.color, finish: sel.finish, flat: sel.flat };
-      const afterProps = { color: sel.color, finish: sel.finish, flat: !sel.flat };
+      const beforeProps = matProps();
+      const afterProps = Object.assign(matProps(), { flat: !sel.flat });
       BT.Mesh.applyMaterialProps(sel, afterProps);
       BT.History.push({ type: "material", id: sel.id, before: beforeProps, after: afterProps });
     });
@@ -1093,6 +1120,17 @@ BT.UI = {
       c.setAttribute("aria-pressed", String(c.dataset.f === sel.finish)));
     const flat = p.querySelector("#flat-toggle");
     if (flat) flat.setAttribute("aria-pressed", String(!sel.flat));
+    const em = BT.Mesh.effectiveMat(sel.finish, sel.rough, sel.metal, sel.emit);
+    const syncSlider = (id, v, fmt) => {
+      const inp = p.querySelector("#" + id);
+      if (!inp || inp === document.activeElement) return;
+      inp.value = v;
+      const out = p.querySelector("#" + id + "-val");
+      if (out) out.textContent = fmt(v);
+    };
+    syncSlider("mat-rough", em.roughness, (v) => v.toFixed(2));
+    syncSlider("mat-metal", em.metalness, (v) => v.toFixed(2));
+    syncSlider("mat-emit", em.emissive, (v) => v ? v.toFixed(2) : "off");
   },
 
   _snapshotTransform(obj) {

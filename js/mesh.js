@@ -36,10 +36,25 @@ BT.Mesh = {
   normalizeFinish(f) { return this.FINISHES[f] ? f : (this.FINISH_ALIASES[f] || "matte"); },
   DEFAULT_COLOR: "#b8b0a6",
 
-  _applyFinish(material, finish, colorHex, hasVertexColors) {
+  /* A finish plus the object's optional per-object overrides (rough, metal,
+     emit; null = use the preset). An emit override makes any finish glow, so
+     the ray tracer samples it as an area light. */
+  effectiveMat(finish, rough, metal, emit) {
     const fin = this.FINISHES[finish];
-    material.metalness = fin.metalness;
-    material.roughness = fin.roughness;
+    return {
+      kind: fin.kind, pattern: fin.pattern || 0,
+      opacity: fin.opacity || 0, density: fin.density || 0,
+      roughness: rough != null ? rough : fin.roughness,
+      metalness: metal != null ? metal : fin.metalness,
+      emissive: emit != null ? emit : (fin.emissive || 0),
+    };
+  },
+
+  _applyFinish(material, finish, colorHex, hasVertexColors, ov) {
+    const fin = this.FINISHES[finish];
+    const em = this.effectiveMat(finish, ov && ov.rough, ov && ov.metal, ov && ov.emit);
+    material.metalness = em.metalness;
+    material.roughness = em.roughness;
     const wasTransparent = material.transparent;
     material.transparent = !!fin.opacity;
     material.opacity = fin.opacity || 1;
@@ -47,9 +62,9 @@ BT.Mesh = {
     if (!hasVertexColors) {
       material.color = new THREE.Color(colorHex).convertSRGBToLinear();
     }
-    if (fin.emissive) {
+    if (em.emissive) {
       material.emissive = new THREE.Color(colorHex).convertSRGBToLinear();
-      material.emissiveIntensity = fin.emissive;
+      material.emissiveIntensity = em.emissive;
     } else {
       material.emissive = new THREE.Color(0x000000);
       material.emissiveIntensity = 1;
@@ -60,8 +75,9 @@ BT.Mesh = {
   // the selection highlight has to coexist with glow's emissive
   setSelectionTint(obj, on) {
     const m = obj.mesh.material;
-    if (this.FINISHES[obj.finish].emissive) {
-      m.emissiveIntensity = on ? 2.1 : this.FINISHES[obj.finish].emissive;
+    const em = this.effectiveMat(obj.finish, obj.rough, obj.metal, obj.emit);
+    if (em.emissive) {
+      m.emissiveIntensity = on ? em.emissive + 0.7 : em.emissive;
     } else {
       m.emissive.setHex(on ? 0x3a1f0a : 0x000000);
     }
@@ -159,6 +175,24 @@ BT.Mesh = {
     return this.weldThreeGeometry(g);
   },
 
+  /* Mesh data from raw arrays: positions is a flat xyz list, faces is a list
+     of 3- or 4-index polygons (quads keep their quad pairing). Used by the
+     MCP create_mesh tool. */
+  createMeshData(positions, faces) {
+    const nV = positions.length / 3;
+    const tris = [], quadPairs = [];
+    for (const face of faces) {
+      const base = tris.length / 3;
+      for (let i = 2; i < face.length; i++) tris.push(face[0], face[i - 1], face[i]);
+      if (face.length === 4) quadPairs.push(base);
+    }
+    const quad = new Int32Array(tris.length / 3).fill(-1);
+    for (const base of quadPairs) { quad[base] = base + 1; quad[base + 1] = base; }
+    const data = this.weldData(new Float32Array(positions), new Uint32Array(tris), null, quad);
+    if (!data.idx.length || nV < 3) throw new Error("the mesh has no usable faces");
+    return data;
+  },
+
   // ---- geometry build / object lifecycle ----------------------------------
 
   buildGeometry(data) {
@@ -190,7 +224,8 @@ BT.Mesh = {
       material.vertexColors = true;
       material.color.setRGB(1, 1, 1);
     }
-    this._applyFinish(material, finish, opts.color || this.DEFAULT_COLOR, !!opts.data.col);
+    const ov = { rough: opts.rough != null ? opts.rough : null, metal: opts.metal != null ? opts.metal : null, emit: opts.emit != null ? opts.emit : null };
+    this._applyFinish(material, finish, opts.color || this.DEFAULT_COLOR, !!opts.data.col, ov);
     const mesh = new THREE.Mesh(geometry, material);
     if (opts.p) mesh.position.fromArray(opts.p);
     if (opts.q) mesh.quaternion.fromArray(opts.q);
@@ -202,6 +237,7 @@ BT.Mesh = {
       color: opts.color || this.DEFAULT_COLOR,
       finish,
       flat: !!opts.flat,
+      rough: ov.rough, metal: ov.metal, emit: ov.emit,
       quadMap: opts.data.quad ? opts.data.quad.slice() : new Int32Array(opts.data.idx.length / 3).fill(-1),
       adjacency: null,
       polys: null,
@@ -227,18 +263,23 @@ BT.Mesh = {
     if (obj.mesh.material.vertexColors !== hasCol) {
       obj.mesh.material.vertexColors = hasCol;
       if (hasCol) obj.mesh.material.color = new THREE.Color(1, 1, 1);
-      else this._applyFinish(obj.mesh.material, obj.finish, obj.color, false);
+      else this._applyFinish(obj.mesh.material, obj.finish, obj.color, false, obj);
       obj.mesh.material.needsUpdate = true;
     }
     BT.emit("geometry", obj);
   },
 
+  /* props may carry rough/metal/emit overrides; a missing or null value
+     clears the override back to the finish preset. */
   applyMaterialProps(obj, props) {
     obj.color = props.color;
     obj.finish = this.normalizeFinish(props.finish);
     obj.flat = props.flat;
+    obj.rough = props.rough != null ? props.rough : null;
+    obj.metal = props.metal != null ? props.metal : null;
+    obj.emit = props.emit != null ? props.emit : null;
     const m = obj.mesh.material;
-    this._applyFinish(m, obj.finish, props.color, m.vertexColors);
+    this._applyFinish(m, obj.finish, props.color, m.vertexColors, obj);
     if (m.flatShading !== props.flat) { m.flatShading = props.flat; m.needsUpdate = true; }
     if (BT.state.selected === obj) this.setSelectionTint(obj, true);
     BT.emit("material", obj);
@@ -274,6 +315,7 @@ BT.Mesh = {
     const d = this.geometryData(obj);
     return {
       id: obj.id, name: obj.name, color: obj.color, finish: obj.finish, flat: obj.flat,
+      rough: obj.rough, metal: obj.metal, emit: obj.emit,
       vis: obj.mesh.visible !== false,
       p: obj.mesh.position.toArray(), q: obj.mesh.quaternion.toArray(), s: obj.mesh.scale.toArray(),
       pos: d.pos, idx: d.idx, col: d.col, quad: d.quad,
@@ -283,6 +325,7 @@ BT.Mesh = {
   deserializeObject(data) {
     const obj = this.createObject({
       id: data.id, name: data.name, color: data.color, finish: data.finish, flat: data.flat,
+      rough: data.rough, metal: data.metal, emit: data.emit,
       p: data.p, q: data.q, s: data.s,
       data: { pos: data.pos, idx: data.idx, col: data.col, quad: data.quad || null },
     });

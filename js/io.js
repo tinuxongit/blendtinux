@@ -89,18 +89,18 @@ BT.IO = {
       if (colAttr) attributes.COLOR_0 = addAccessor(colAttr.array, 5126, "VEC3", 34962, false);
       const indices = addAccessor(idx, idx instanceof Uint16Array ? 5123 : 5125, "SCALAR", 34963, false);
 
-      const fin = BT.Mesh.FINISHES[obj.finish];
+      const em = BT.Mesh.effectiveMat(obj.finish, obj.rough, obj.metal, obj.emit);
       const c = colAttr ? new THREE.Color(1, 1, 1) : new THREE.Color(obj.color).convertSRGBToLinear();
       const mat = {
         name: obj.name + " material",
         pbrMetallicRoughness: {
-          baseColorFactor: [c.r, c.g, c.b, fin.opacity || 1],
-          metallicFactor: fin.metalness,
-          roughnessFactor: fin.roughness,
+          baseColorFactor: [c.r, c.g, c.b, em.opacity || 1],
+          metallicFactor: em.metalness,
+          roughnessFactor: em.roughness,
         },
       };
-      if (fin.opacity) mat.alphaMode = "BLEND";
-      if (fin.emissive) {
+      if (em.opacity) mat.alphaMode = "BLEND";
+      if (em.emissive) {
         const e = new THREE.Color(obj.color).convertSRGBToLinear();
         mat.emissiveFactor = [Math.min(e.r, 1), Math.min(e.g, 1), Math.min(e.b, 1)];
       }
@@ -257,9 +257,19 @@ BT.IO = {
 
   // ---- OBJ import -----------------------------------------------------------------
 
-  importOBJText(text, filename) {
-    const rawPos = [], rawCol = [], faces = [], quadPairs = [];
+  /* Returns the list of created objects. Each `o`/`g` group becomes its own
+     object (opts.split = false merges everything into one). opts.fit = false
+     keeps the file's exact coordinates; otherwise oddly-scaled models are
+     normalized and set on the ground, with one shared transform so multi-part
+     files keep their relative layout. */
+  importOBJText(text, filename, opts) {
+    opts = opts || {};
+    const fit = opts.fit !== false;
+    const split = opts.split !== false;
+    const rawPos = [], rawCol = [];
     let hasColor = false;
+    const groups = [];
+    let cur = null;
     const lines = text.split(/\r?\n/);
     for (const line of lines) {
       if (line.length < 2) continue;
@@ -270,52 +280,103 @@ BT.IO = {
           hasColor = true;
           rawCol.push(parseFloat(t[4]), parseFloat(t[5]), parseFloat(t[6]));
         } else rawCol.push(1, 1, 1);
+      } else if (t[0] === "o" || t[0] === "g") {
+        const gname = t.slice(1).join(" ");
+        if (!cur || cur.faces.length) groups.push(cur = { name: gname, faces: [], quadPairs: [] });
+        else if (gname) cur.name = gname;
       } else if (t[0] === "f") {
+        if (!cur) groups.push(cur = { name: "", faces: [], quadPairs: [] });
         const vs = [];
         for (let i = 1; i < t.length; i++) {
           let vi = parseInt(t[i].split("/")[0], 10);
           if (vi < 0) vi = rawPos.length / 3 + vi + 1;
           vs.push(vi - 1);
         }
-        const base = faces.length / 3;
-        for (let i = 2; i < vs.length; i++) faces.push(vs[0], vs[i - 1], vs[i]);
-        if (vs.length === 4) quadPairs.push(base); // the two fan triangles form a quad
+        const base = cur.faces.length / 3;
+        for (let i = 2; i < vs.length; i++) cur.faces.push(vs[0], vs[i - 1], vs[i]);
+        if (vs.length === 4) cur.quadPairs.push(base); // the two fan triangles form a quad
       }
     }
-    if (!rawPos.length || !faces.length) { BT.emit("toast", "could not read that .obj file"); return null; }
-
-    let col = null;
-    if (hasColor) {
-      col = new Float32Array(rawCol.length);
-      for (let i = 0; i < rawCol.length; i++) col[i] = Math.pow(BT.clamp(rawCol[i], 0, 1), 2.2);
+    let parts = groups.filter((g) => g.faces.length);
+    if (!rawPos.length || !parts.length) { BT.emit("toast", "could not read that .obj file"); return null; }
+    if (!split && parts.length > 1) {
+      const merged = { name: "", faces: [], quadPairs: [] };
+      for (const p of parts) {
+        const base = merged.faces.length / 3;
+        for (const f of p.faces) merged.faces.push(f);
+        for (const q of p.quadPairs) merged.quadPairs.push(q + base);
+      }
+      parts = [merged];
     }
-    const quad = new Int32Array(faces.length / 3).fill(-1);
-    for (const base of quadPairs) { quad[base] = base + 1; quad[base + 1] = base; }
-    const data = BT.Mesh.weldData(new Float32Array(rawPos), new Uint32Array(faces), col, quad);
-    if (!data.idx.length) { BT.emit("toast", "could not read that .obj file"); return null; }
 
-    const name = (filename || "import").replace(/\.obj$/i, "").slice(0, 40) || "import";
-    const obj = BT.Mesh.createObject({ data, name });
+    let colLin = null;
+    if (hasColor) {
+      colLin = new Float32Array(rawCol.length);
+      for (let i = 0; i < rawCol.length; i++) colLin[i] = Math.pow(BT.clamp(rawCol[i], 0, 1), 2.2);
+    }
 
-    // fit oddly-scaled models into the scene and set them on the ground
-    const g = obj.mesh.geometry;
-    g.computeBoundingBox();
-    const bb = g.boundingBox, size = new THREE.Vector3();
-    bb.getSize(size);
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const s = maxDim > 6 || maxDim < 0.2 ? 2 / maxDim : 1;
-    obj.mesh.scale.setScalar(s);
-    obj.mesh.position.set(
-      -(bb.min.x + bb.max.x) * 0.5 * s,
-      -bb.min.y * s,
-      -(bb.min.z + bb.max.z) * 0.5 * s
-    );
+    // each part keeps only the vertices its faces use
+    const compact = (faces) => {
+      const remap = new Map();
+      const pos = [], col = colLin ? [] : null;
+      const idx = new Uint32Array(faces.length);
+      for (let i = 0; i < faces.length; i++) {
+        const v = faces[i];
+        let n = remap.get(v);
+        if (n === undefined) {
+          n = remap.size;
+          remap.set(v, n);
+          pos.push(rawPos[v * 3], rawPos[v * 3 + 1], rawPos[v * 3 + 2]);
+          if (col) col.push(colLin[v * 3], colLin[v * 3 + 1], colLin[v * 3 + 2]);
+        }
+        idx[i] = n;
+      }
+      return { pos: new Float32Array(pos), idx, col: col ? new Float32Array(col) : null };
+    };
 
-    BT.addObject(obj, true);
-    BT.History.push({ type: "add", data: BT.Mesh.serializeObject(obj) });
-    BT.Viewport.frameObject(obj);
-    BT.emit("toast", "imported " + name + " (" + BT.Mesh.vertCount(obj).toLocaleString() + " verts)");
-    return obj;
+    const baseName = (filename || "import").replace(/\.obj$/i, "").slice(0, 40) || "import";
+    const made = [];
+    const bb = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+    for (const part of parts) {
+      const c = compact(part.faces);
+      const quad = new Int32Array(c.idx.length / 3).fill(-1);
+      for (const base of part.quadPairs) { quad[base] = base + 1; quad[base + 1] = base; }
+      const data = BT.Mesh.weldData(c.pos, c.idx, c.col, quad);
+      if (!data.idx.length) continue;
+      for (let i = 0; i < data.pos.length; i += 3) {
+        for (let k = 0; k < 3; k++) {
+          if (data.pos[i + k] < bb.min[k]) bb.min[k] = data.pos[i + k];
+          if (data.pos[i + k] > bb.max[k]) bb.max[k] = data.pos[i + k];
+        }
+      }
+      const name = (part.name || (parts.length > 1 ? baseName + " " + (made.length + 1) : baseName)).slice(0, 40);
+      made.push(BT.Mesh.createObject({ data, name }));
+    }
+    if (!made.length) { BT.emit("toast", "could not read that .obj file"); return null; }
+
+    // one shared transform keeps multi-part files aligned
+    if (fit) {
+      const size = [bb.max[0] - bb.min[0], bb.max[1] - bb.min[1], bb.max[2] - bb.min[2]];
+      const maxDim = Math.max(size[0], size[1], size[2]) || 1;
+      const s = maxDim > 6 || maxDim < 0.2 ? 2 / maxDim : 1;
+      for (const obj of made) {
+        obj.mesh.scale.setScalar(s);
+        obj.mesh.position.set(
+          -(bb.min[0] + bb.max[0]) * 0.5 * s,
+          -bb.min[1] * s,
+          -(bb.min[2] + bb.max[2]) * 0.5 * s
+        );
+      }
+    }
+
+    for (const obj of made) BT.addObject(obj, obj === made[0]);
+    const adds = made.map((obj) => ({ type: "add", data: BT.Mesh.serializeObject(obj) }));
+    BT.History.push(adds.length === 1 ? adds[0] : { type: "batch", cmds: adds });
+    BT.Viewport.frameObject(made[0]);
+    let total = 0;
+    for (const obj of made) total += BT.Mesh.vertCount(obj);
+    BT.emit("toast", "imported " + (made.length > 1 ? made.length + " objects" : made[0].name) + " (" + total.toLocaleString() + " verts)");
+    return made;
   },
 
   // ---- autosave -------------------------------------------------------------------
@@ -343,7 +404,7 @@ BT.IO = {
     const cam = BT.Viewport.cam;
     const payload = {
       v: 1,
-      cam: { t: cam.target.toArray(), theta: cam.theta, phi: cam.phi, dist: cam.dist },
+      cam: { t: cam.target.toArray(), theta: cam.theta, phi: cam.phi, dist: cam.dist, fov: BT.Viewport.camera.fov },
       mode: s.mode === "render" ? "object" : s.mode, // never boot into a live tracer
       render: BT.Render.settings,
       sel: s.selected ? s.selected.id : null,
@@ -351,6 +412,7 @@ BT.IO = {
         const d = BT.Mesh.serializeObject(obj);
         return {
           id: d.id, name: d.name, color: d.color, finish: d.finish, flat: d.flat, vis: d.vis,
+          rough: d.rough, metal: d.metal, emit: d.emit,
           p: d.p, q: d.q, s: d.s,
           pos: BT.b64FromF32(d.pos),
           idx: BT.b64FromU32(d.idx),
@@ -417,6 +479,7 @@ BT.IO = {
       for (const d of payload.objects) {
         const obj = BT.Mesh.deserializeObject({
           id: d.id, name: d.name, color: d.color, finish: d.finish, flat: d.flat, vis: d.vis,
+          rough: d.rough, metal: d.metal, emit: d.emit,
           p: d.p, q: d.q, s: d.s,
           pos: BT.f32FromB64(d.pos),
           idx: BT.u32FromB64(d.idx),
@@ -428,6 +491,10 @@ BT.IO = {
       const cam = BT.Viewport.cam;
       cam.target.fromArray(payload.cam.t);
       cam.theta = payload.cam.theta; cam.phi = payload.cam.phi; cam.dist = payload.cam.dist;
+      if (payload.cam.fov) {
+        BT.Viewport.camera.fov = payload.cam.fov;
+        BT.Viewport.camera.updateProjectionMatrix();
+      }
       Object.assign(BT.Render.settings, BT.Render.DEFAULTS, payload.render || {});
       if (payload.sel) BT.select(BT.findObject(payload.sel));
       if (payload.mode && payload.mode !== "object") BT.setMode(payload.mode);

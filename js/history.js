@@ -36,6 +36,7 @@ BT.History = {
     if (cmd.data) { acc(cmd.data.pos); acc(cmd.data.idx); acc(cmd.data.col); }
     if (cmd.before && cmd.before.pos) { acc(cmd.before.pos); acc(cmd.before.idx); acc(cmd.before.col); }
     if (cmd.after && cmd.after.pos) { acc(cmd.after.pos); acc(cmd.after.idx); acc(cmd.after.col); }
+    if (cmd.cmds) for (const c of cmd.cmds) n += this._size(c);
     return n;
   },
 
@@ -102,6 +103,11 @@ BT.History = {
         if (!obj) return;
         obj.mesh.visible = undo ? cmd.before : cmd.after;
         BT.emit("objects");
+        break;
+      }
+      case "batch": { // several sub-commands as one undo step
+        const list = undo ? cmd.cmds.slice().reverse() : cmd.cmds;
+        for (const c of list) this._apply(c, undo);
         break;
       }
     }

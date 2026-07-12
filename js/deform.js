@@ -59,12 +59,9 @@ BT.Deform = {
     BT.emit("deform", null);
   },
 
-  _recompute() {
-    const s = this.session;
-    const g = s.obj.mesh.geometry;
-    const pos = g.getAttribute("position").array;
-    const base = s.base;
-    const a = s.axis, u = (a + 1) % 3, v = (a + 2) % 3;
+  // the actual math, shared by the interactive session and the MCP tool
+  computeInto(pos, base, baseNor, kind, axis, amount, freq) {
+    const a = axis, u = (a + 1) % 3, v = (a + 2) % 3;
 
     // bbox range along the chosen axis, from the base shape
     let h0 = Infinity, h1 = -Infinity;
@@ -73,10 +70,10 @@ BT.Deform = {
       if (base[i] > h1) h1 = base[i];
     }
     const L = Math.max(h1 - h0, 1e-6);
-    const A = s.amount;
+    const A = amount;
 
-    if (s.kind === "noise") {
-      const nor = s.baseNor, f = s.freq;
+    if (kind === "noise") {
+      const nor = baseNor, f = freq;
       for (let i = 0; i < base.length; i += 3) {
         const d = A * BT.valueNoise3(base[i] * f, base[i + 1] * f, base[i + 2] * f);
         pos[i] = base[i] + nor[i] * d;
@@ -88,14 +85,14 @@ BT.Deform = {
         const h = base[i + a], pu = base[i + u], pv = base[i + v];
         const t = (h - h0) / L;
         let nh = h, nu = pu, nv = pv;
-        if (s.kind === "twist") {
+        if (kind === "twist") {
           const ang = A * t, c = Math.cos(ang), sn = Math.sin(ang);
           nu = pu * c - pv * sn;
           nv = pu * sn + pv * c;
-        } else if (s.kind === "taper") {
+        } else if (kind === "taper") {
           const f = Math.max(0.05, 1 + A * (t - 0.5) * 2);
           nu = pu * f; nv = pv * f;
-        } else if (s.kind === "bend") {
+        } else if (kind === "bend") {
           if (Math.abs(A) > 1e-4) {
             const R = L / A, theta = t * A, r = R - pu;
             nu = R - r * Math.cos(theta);
@@ -105,7 +102,22 @@ BT.Deform = {
         pos[i + a] = nh; pos[i + u] = nu; pos[i + v] = nv;
       }
     }
+  },
 
+  // one-shot deform (the MCP deform_object tool), undoable
+  applyTo(obj, kind, axis, amount, freq) {
+    const g = obj.mesh.geometry;
+    const before = g.getAttribute("position").array.slice();
+    const baseNor = g.getAttribute("normal").array.slice();
+    this.computeInto(g.getAttribute("position").array, before, baseNor, kind, axis, amount, freq == null ? 2.5 : freq);
+    BT.Mesh.afterVertsChanged(obj, null);
+    BT.History.push({ type: "positions", id: obj.id, before, after: g.getAttribute("position").array.slice() });
+  },
+
+  _recompute() {
+    const s = this.session;
+    const g = s.obj.mesh.geometry;
+    this.computeInto(g.getAttribute("position").array, s.base, s.baseNor, s.kind, s.axis, s.amount, s.freq);
     s.dirty = true;
     g.getAttribute("position").needsUpdate = true;
     g.computeVertexNormals();
