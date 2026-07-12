@@ -47,7 +47,7 @@ BT.MCP = {
   toggle() {
     this.enabled = !this.enabled;
     try { localStorage.setItem(this.KEY, this.enabled ? "1" : "0"); } catch (_) {}
-    if (this.enabled) { this._ti = 0; this._retry = 0; this._connect(); }
+    if (this.enabled) { this._ti = 0; this._retry = 0; this._announce = true; this._connect(); }
     else this._disconnect();
     BT.emit("mcp");
   },
@@ -73,9 +73,14 @@ BT.MCP = {
       this.via = target.via;
       ws.send(JSON.stringify({ hello: { app: "blendtinux", v: 1 } }));
       BT.emit("mcp");
-      BT.emit("toast", target.via === "relay"
-        ? "MCP linked via relay, your code is " + this.code + " (click it up top to copy your address)"
-        : "MCP connected to the local server");
+      if (target.via === "relay") {
+        // walk the user through hooking Claude up right after they opt in
+        if (this._announce) BT.emit("mcp-pop");
+        else BT.emit("toast", "MCP linked, your code is " + this.code + " (click it up top for setup)");
+      } else {
+        BT.emit("toast", "MCP connected to the local server");
+      }
+      this._announce = false;
     };
     ws.onmessage = (ev) => this._handle(ev);
     ws.onclose = () => {

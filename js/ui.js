@@ -153,13 +153,8 @@ BT.UI = {
     const mcpCode = document.getElementById("mcp-code");
     mcp.innerHTML = this.ic("plug");
     mcp.addEventListener("click", () => BT.MCP.toggle());
-    mcpCode.addEventListener("click", () => {
-      const url = BT.MCP.url();
-      const done = () => this.toast("MCP address copied: " + url);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(done, () => this.toast(url));
-      } else this.toast(url);
-    });
+    mcpCode.addEventListener("click", () => this._showMcpPop());
+    BT.on("mcp-pop", () => this._showMcpPop());
     const syncMcp = () => {
       mcp.setAttribute("aria-pressed", String(BT.MCP.connected));
       mcp.classList.toggle("waiting", BT.MCP.enabled && !BT.MCP.connected);
@@ -173,7 +168,7 @@ BT.UI = {
       mcpCode.hidden = !(BT.MCP.connected && BT.MCP.via === "relay");
       if (!mcpCode.hidden) {
         mcpCode.textContent = BT.MCP.code;
-        mcpCode.dataset.tip = "your pairing code, click to copy your MCP address, then: claude mcp add --transport http blendtinux <paste>";
+        mcpCode.dataset.tip = "your pairing code, click for setup instructions";
       }
     };
     BT.on("mcp", syncMcp);
@@ -188,6 +183,43 @@ BT.UI = {
       reader.readAsText(file);
       e.importFile.value = "";
     });
+  },
+
+  // ---- MCP setup popup ---------------------------------------------------------
+
+  _copy(text, label) {
+    const done = () => this.toast(label + " copied");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, () => this.toast(text));
+    } else this.toast(text);
+  },
+
+  _showMcpPop() {
+    let pop = document.getElementById("mcp-pop");
+    if (!pop) {
+      pop = document.createElement("div");
+      pop.id = "mcp-pop";
+      document.getElementById("app").appendChild(pop);
+      pop.addEventListener("click", (ev) => { if (ev.target === pop) pop.hidden = true; });
+    }
+    const url = BT.MCP.url();
+    const cmd = "claude mcp add --transport http blendtinux " + url;
+    pop.innerHTML =
+      '<div class="mcp-card">' +
+      '<div class="plabel">Let Claude build in this tab</div>' +
+      '<p>This tab has its own MCP address (code <span class="mono">' + this._esc(BT.MCP.code) + "</span>). " +
+      "Anything you connect it to can see and edit this scene, and only this scene. Keep the tab open.</p>" +
+      "<p><strong>Claude Code</strong> · one command in any terminal does everything:</p>" +
+      '<div class="mcp-cmd"><code>' + this._esc(cmd) + '</code><button class="abtn primary" data-copy="cmd">Copy</button></div>' +
+      "<p><strong>claude.ai or Claude Desktop</strong> · Settings, Connectors, Add custom connector, then paste the address:</p>" +
+      '<div class="mcp-cmd"><code>' + this._esc(url) + '</code><button class="abtn" data-copy="url">Copy</button></div>' +
+      '<p>Then just ask Claude, for example: "look at my BlendTinux scene and build a lighthouse on a rocky island, then render it".</p>' +
+      '<div class="agrid" style="grid-template-columns:1fr"><button class="abtn" id="mcp-pop-close">Done</button></div>' +
+      "</div>";
+    pop.hidden = false;
+    pop.querySelector('[data-copy="cmd"]').addEventListener("click", () => this._copy(cmd, "command"));
+    pop.querySelector('[data-copy="url"]').addEventListener("click", () => this._copy(url, "address"));
+    pop.querySelector("#mcp-pop-close").addEventListener("click", () => { pop.hidden = true; });
   },
 
   // ---- project menu ------------------------------------------------------------
@@ -1169,13 +1201,16 @@ BT.UI = {
         case "d": if (e.shiftKey && BT.state.mode === "object") { e.preventDefault(); this.duplicateSelected(); } break;
         case "[": BT.Sculpt.nudgeRadius(1 / 1.15); break;
         case "]": BT.Sculpt.nudgeRadius(1.15); break;
-        case "escape":
-          if (BT.state.mode === "render") BT.setMode("object");
+        case "escape": {
+          const mcpPop = document.getElementById("mcp-pop");
+          if (mcpPop && !mcpPop.hidden) mcpPop.hidden = true;
+          else if (BT.state.mode === "render") BT.setMode("object");
           else if (BT.state.gizmoMode === "cut") BT.Gizmo.setMode("select");
           else if (BT.Deform.session) BT.Deform.cancel();
           else if (BT.state.mode !== "object") BT.setMode("object");
           else BT.select(null);
           break;
+        }
       }
     });
   },
